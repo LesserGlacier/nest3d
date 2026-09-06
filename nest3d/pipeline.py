@@ -213,7 +213,9 @@ def _refine(fine_poses, meshes, coarse, seed, budget, contact_weight,
     # differently and an exactly-zero-slack box is often unreachable.
     fine_pitch = fine_poses[0][0].pitch
     near = np.asarray(coarse.extents, dtype=float) + 1.5 * fine_pitch
-    attempts = [(coarse.objective, near, iterations),
+    attempts = [(coarse.objective, np.asarray(coarse.extents, dtype=float),
+                 iterations),
+                (coarse.objective, near, iterations),
                 ("volume", near, iterations),
                 (coarse.objective, coarse.container, iterations),
                 ("compact", None, 60)]
