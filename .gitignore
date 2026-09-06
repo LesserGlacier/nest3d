@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+results/
+packed.step
+packed.stl
+packing.json

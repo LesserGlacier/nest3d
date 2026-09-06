@@ -1,0 +1,8 @@
+numpy>=1.24
+scipy>=1.10
+trimesh>=4.0
+cadquery-ocp>=7.7        # OpenCascade: STEP read/write. Optional for mesh-only use.
+
+# Only needed to run tests/test_nest3d.py's independent verification:
+# rtree
+# manifold3d
