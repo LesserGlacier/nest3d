@@ -90,6 +90,7 @@
     background: transparent; border: 1px solid var(--panel-edge);
     border-radius: 4px; transition: color .12s, border-color .12s, background .12s;
   }
+  .modes button.wide { grid-column: 1 / -1; }
   .modes button:hover { color: var(--ink); }
   .modes button[aria-pressed="true"] {
     color: var(--ground); background: var(--accent); border-color: var(--accent);
@@ -168,6 +169,8 @@
   .phase[data-p="squeeze"] { color: var(--measure); border-color: var(--measure); }
   .phase[data-p="winner"] { color: var(--ground); background: var(--accent);
                             border-color: var(--accent); }
+  .phase[data-p="settle"] { color: var(--measure); border-color: var(--measure); }
+  .phase[data-p="tip"] { color: var(--accent); border-color: var(--accent); }
 
   #hint { position: fixed; right: 16px; top: 16px; text-align: right;
           color: var(--faint); font-size: 11px; line-height: 1.6;
@@ -195,6 +198,7 @@
       <button id="m-search" aria-pressed="false">Walk</button>
       <button id="m-build" aria-pressed="false">Build</button>
       <button id="m-pack" aria-pressed="false">Pack</button>
+      <button id="m-settle" aria-pressed="false" class="wide">Settle</button>
     </div>
     <p id="modehelp"></p>
   </div>
@@ -251,6 +255,7 @@
     best: "Every improvement found across all 20 parallel chains, ordered worst to best. Ends on the arrangement actually chosen. Ordered by quality, not by time.",
     search: "One chain's real walk through the search, in time order. It accepts worse boxes on purpose so it can climb out of a local optimum — watch it settle, jump, and re-settle.",
     build: "The winning arrangement in the order the algorithm placed it, largest first, with the box growing. Shows which part forces the box open.",
+    settle: "The closing settle, one pass at a time. Same nine parts, same orientations — only their positions change, re-seated on a lattice several times finer than the search could afford. TIP frames are the box being tipped to shake the slack to one wall; SETTLE frames are parts taking up the room that freed. The box only ever shrinks.",
     pack: "Loading order for the real carton: lowest piece first, box fixed at final size. Ordered by height, not verified for insertion clearance — a piece may still need to go in at an angle."
   };
 
@@ -384,6 +389,7 @@
   var tracks = {
     best: DATA.tracks.best,
     search: DATA.tracks.search,
+    settle: DATA.tracks.settle || [],
     build: DATA.tracks.best.length
       ? DATA.tracks.best[DATA.tracks.best.length - 1] : null
   };
@@ -553,6 +559,7 @@
     }
     var ref = (mode === "build" && buildAABBs.length)
       ? buildAABBs[buildAABBs.length - 1]
+      : (mode === "settle" && tracks.settle.length) ? tracks.settle[0]
       : (tracks.best.length ? { ext: tracks.best[0].ext } : { ext: [400, 400, 400] });
     var d = Math.sqrt(ref.ext[0] * ref.ext[0] + ref.ext[1] * ref.ext[1] +
                       ref.ext[2] * ref.ext[2]);
@@ -575,16 +582,17 @@
   }
 
   // ---- UI ------------------------------------------------------------
+  var MODES = ["best", "search", "build", "pack", "settle"];
   function setMode(next) {
     mode = next;
-    ["best", "search", "build", "pack"].forEach(function (k) {
+    MODES.forEach(function (k) {
       document.getElementById("m-" + k)
         .setAttribute("aria-pressed", String(k === next));
     });
     document.getElementById("modehelp").textContent = HELP[next];
     idx = 0; buildTicks(); fitCamera(); render(idx);
   }
-  ["best", "search", "build", "pack"].forEach(function (k) {
+  MODES.forEach(function (k) {
     document.getElementById("m-" + k).addEventListener("click", function () {
       setMode(k);
     });
@@ -662,16 +670,17 @@
       : DATA.stats.evaluated.toLocaleString() +
         " arrangements were built and scored to get here.");
 
-  if (!tracks.search || !tracks.search.length) {
-    var wb = document.getElementById("m-search");
-    wb.disabled = true; wb.style.opacity = ".45"; wb.style.cursor = "default";
-  }
+  [["search", tracks.search], ["settle", tracks.settle]].forEach(function (e) {
+    if (e[1] && e[1].length) return;
+    var b = document.getElementById("m-" + e[0]);
+    b.disabled = true; b.style.opacity = ".45"; b.style.cursor = "default";
+  });
   precomputeBuild();
   precomputePack();
   resize();
   setMode("best");
 
-  var speed = { best: 700, search: 110, build: 520, pack: 900 };
+  var speed = { best: 700, search: 110, build: 520, pack: 900, settle: 260 };
   function loop(now) {
     requestAnimationFrame(loop);
     if (playing) {
