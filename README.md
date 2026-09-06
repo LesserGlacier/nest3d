@@ -152,6 +152,47 @@ Because the masks are conservative, a reported density of 45% means the box
 is genuinely 45% solid part — the slack is real clearance between parts,
 not measurement error.
 
+## Things that were tried and are not here
+
+**A bigger search window for the settle.** Tripling and quintupling the
+radius each part may move within changes the answer by exactly nothing on
+the sample parts. The settle is not reach-limited; it is stuck at a
+*one-part-move* optimum, where the box is held open by parts that each
+need another to move first.
+
+**A wall push: force a face inward and relax.** The lattice version of what
+a physics engine would do — pull one face of the box in by a voxel, declare
+that the box, and let the parts shove each other with Gauss-Seidel
+relaxation (each part in turn to the offset that overlaps the others least
+while staying inside), randomised restarts from the best state seen when
+descent stalls. It works, and it is dominated. Measured on three packed
+arrangements, at 160 voxels across the largest part:
+
+| arrangement | sweep only | + tipping | + wall push | + both |
+|---|---|---|---|---|
+| A | 54.79% | 54.79% | 54.79% | 54.79% |
+| B | 54.87% | 55.77% | 55.17% | 55.77% |
+| C | 58.26% | 59.25% | 59.19% | 59.25% |
+
+The push beats a bare sweep, never beats tipping, and adds nothing at all
+on top of it — for fifteen times the run time against tipping's five. Both
+escape the same trap, and tipping is the cheaper way out. Once the sweeps
+and the tips have run, a one-voxel shrink on any face is genuinely
+infeasible: the relaxation gets within about seventy voxels of overlap and
+five times the effort does not close them.
+
+**Which is also the answer to "why not simulate the physics".** A rigid-body
+sim buys exactly one thing over the geometry here — parts moving together,
+under contact, instead of one at a time. That is worth having, and the two
+cheap versions of it above are already at the point of diminishing returns.
+Against that it costs convex decomposition of every part, tens of thousands
+of collision steps per trial where the settle evaluates thousands of
+candidate positions per part per second, a stochastic result that needs
+many trials, and soft contacts that permit interpenetration — which would
+forfeit the no-overlap guarantee this tool is built on and need an exact
+re-check and a push-apart pass that grows the box again. Settling under
+gravity also minimises height along one axis, which is not the objective.
+
 ## Install
 
 ```
