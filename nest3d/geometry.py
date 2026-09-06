@@ -115,6 +115,34 @@ def _tessellate(shape, linear_deflection, angular_deflection):
     return np.vstack(verts), np.vstack(faces)
 
 
+def _drop_degenerate(mesh):
+    """Remove zero-area faces left behind by tessellation.
+
+    A single sliver is enough to make trimesh call an otherwise perfectly
+    closed solid non-watertight, and to split it into a phantom second
+    component.  That in turn would stop the interior fill, so the part
+    would voxelise as a hollow shell and other parts could be packed
+    inside it.  Cheap to strip, expensive to miss.
+    """
+    try:
+        keep = mesh.nondegenerate_faces()
+    except Exception:
+        try:
+            areas = np.asarray(mesh.area_faces, dtype=float)
+            keep = areas > max(float(areas.max()) * 1e-12, 1e-12)
+        except Exception:
+            return mesh
+    keep = np.asarray(keep)
+    if keep.dtype == bool:
+        dropped = int((~keep).sum())
+    else:
+        dropped = len(mesh.faces) - len(keep)
+    if dropped:
+        mesh.update_faces(keep)
+        mesh.remove_unreferenced_vertices()
+    return mesh
+
+
 def _auto_deflection(shape) -> float:
     from OCP.Bnd import Bnd_Box
     from OCP.BRepBndLib import BRepBndLib
@@ -162,6 +190,7 @@ def load_step(path, deflection=None, angular_deflection=0.35,
         v, f = _tessellate(shape, defl, angular_deflection)
         mesh = trimesh.Trimesh(vertices=v, faces=f, process=True)
         mesh.merge_vertices()
+        _drop_degenerate(mesh)
         try:
             mesh.fix_normals()
         except Exception:
