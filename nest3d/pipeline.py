@@ -115,6 +115,10 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
     # given a small slice of its own because it buys more per second than
     # either search pass does -- but it is also usually done long before it
     # spends the slice.
+    # A fixed container is answered at one pitch, so there is no refinement
+    # to reserve for -- and reserving it anyway is how a --container run
+    # came to spend only two thirds of the budget it was given.
+    refine = refine and container is None
     settle_share = 0.10 if settle else 0.0
     refine_share = (0.35 - settle_share / 2) if refine else 0.0
     coarse_budget = time_budget * (1.0 - refine_share - settle_share)
@@ -146,7 +150,7 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
     final_poses = poses
     final_pitch = coarse_pitch
 
-    if refine and container is None:
+    if refine:
         t0 = time.time()
         fine_pitch = pitch / 1.7 if pitch else suggest_pitch(meshes, refine_resolution)
         fine_clearance = (int(np.ceil(clearance / (2 * fine_pitch)))
@@ -242,8 +246,22 @@ def _solve_fixed_container(poses, meshes, container, objective, seed,
                     else "volume", container=container,
                     contact_weight=contact_weight)
     search = Search(packer, seed=seed)
-    iters = max(60, int(budget / 0.08))
-    best = search.run(starts=4, iterations=min(iters, 600))
+
+    # Time one arrangement rather than assuming what one costs.  An
+    # iteration count derived from a guess is what made --time advisory
+    # here: at 80 ms an evaluation it overran a small budget several times
+    # over, while the 600-iteration cap left a large one unspent.  The
+    # count still has to be right, not just bounded -- the annealing
+    # temperature is scheduled against it, so a loop cut short by the
+    # clock alone would never cool.
+    starts = 4
+    probe = time.time()
+    search.evaluate(tuple(range(len(poses))), tuple(0 for _ in poses))
+    per_eval = max(time.time() - probe, 1e-4)
+    iters = int(min(20000, max(60, (budget / starts) / per_eval)))
+
+    best = search.run(starts=starts, iterations=iters,
+                      deadline=time.time() + budget)
     pv = part_volume(poses, meshes)
 
     if not best.packing.feasible:
