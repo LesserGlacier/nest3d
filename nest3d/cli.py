@@ -75,9 +75,10 @@ def build_parser():
                    help="skip the final settle, which shakes the finished "
                         "arrangement down onto a much finer lattice")
     p.add_argument("--settle-resolution", type=int, default=96,
-                   help="voxels across the largest part for the settle "
-                        "(default 96). Costs seconds, not minutes, because "
-                        "nothing is searched -- each part just re-seats.")
+                   help="voxels across the largest part for the settle's "
+                        "first lattice (default 96). Finer ones are tried "
+                        "alongside it, one per worker, and the smallest box "
+                        "wins -- so --workers buys settle quality too.")
     p.add_argument("--contact", dest="contact_weight", type=float, default=0.0,
                    help="tie-break weight favouring snug placements "
                         "(0 disables, 1 is a good value to try)")

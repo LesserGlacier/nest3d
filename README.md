@@ -100,7 +100,9 @@ from the voxels, so that looseness never inflates the reported answer.
 The settle moves parts on a lattice the search never saw, so it re-earns
 the guarantee there rather than inheriting it: the fine masks are
 conservative in exactly the same way, and a part only ever moves to an
-offset whose overlap with the rest of the pile is zero.
+offset whose overlap with the rest of the pile is zero. That holds for
+every lattice it tries, and the arrangement it reports is whichever one
+came out smallest.
 
 `tests/test_nest3d.py` checks this end to end by taking the packed result
 back to the triangle meshes and running exact boolean intersections on
@@ -118,7 +120,7 @@ nest inside a tube. Only fully enclosed cavities are filled, which is right
 | `--workers N` | parallel solve chains. Use most of your cores. |
 | `--resolution N` | voxels across the largest part during search (default 28). Cost is roughly N³. |
 | `--refine-resolution N` | pitch for the final tightening pass (default 48). |
-| `--settle-resolution N` | pitch for the closing settle (default 96). Costs seconds, not minutes: nothing is searched, each part just re-seats. |
+| `--settle-resolution N` | first lattice for the closing settle (default 96). Finer ones are tried alongside it, one per worker, and the smallest box wins — so `--workers` buys settle quality too. |
 | `--no-settle` | skip the settle and report the arrangement exactly as the search left it. |
 | `--clearance MM` | minimum gap to hold between parts. Half is applied to each part, so the gap you ask for is the gap you get. |
 | `--orientations` | `axis` = the 24 box rotations; `rest` (default) adds stable resting poses; `fine`/`full` add sampled SO(3) for genuinely oblique placements. |
@@ -135,6 +137,16 @@ skin); at 48 it is 1.08–1.34. Finer means a tighter answer and cubically
 more time, which is why the search runs coarse, the refinement runs fine,
 and only the settle — which evaluates a few positions per part instead of
 thousands of arrangements — runs finer still.
+
+Which fine lattice settles best is not predictable, though. A finer one has
+a thinner skin to give back, but it is also a different lattice: the parts
+round onto it differently and the sweep converges somewhere else. Over four
+arrangements of the sample parts the finest lattice won twice, the middle
+two once each, and 96 — the pitch the settle used to run at on its own —
+never. So the settle runs several, one per worker, and keeps the smallest
+box; on those four that is worth 0.8 to 1.8 points of density over 96
+alone. None of them can return anything worse than the arrangement it was
+handed, so trying more only costs cores.
 
 Because the masks are conservative, a reported density of 45% means the box
 is genuinely 45% solid part — the slack is real clearance between parts,

@@ -180,7 +180,8 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
         settled = settle_arrangement(
             meshes, result.packer, result.packing,
             resolution=settle_resolution, clearance=clearance,
-            budget=max(5.0, time_budget * settle_share), say=say)
+            budget=max(5.0, time_budget * settle_share), workers=workers,
+            say=say)
         timings["settle"] = time.time() - t0
         if settled is not None:
             s_packer, s_packing, s_ext = settled
