@@ -1,0 +1,8 @@
+# Normalise line endings in the repo so checkouts on Windows and macOS
+# agree; without this the same file reads as modified on the other machine.
+* text=auto eol=lf
+
+*.step  text eol=lf
+*.stp   text eol=lf
+*.stl   binary
+*.png   binary
