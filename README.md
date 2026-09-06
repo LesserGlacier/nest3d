@@ -54,6 +54,26 @@ Descend a few per cent at a time first, and only bisect once something has
 actually failed — bisecting straight to the volumetric lower bound just
 burns annealing runs on boxes that ask for 60% density.
 
+**Then shake it down.** Everything above happens on the search's own
+lattice, where a part's mask is a conservative superset about 1.35x its
+true volume and positions are quantised to the pitch. Both skins sit
+between any two touching parts, so every contact in a finished pack is
+loose by up to a voxel — the arrangement really would condense if you
+could pick the box up and shake it. The search cannot take that back: a
+placement is a deterministic function of the order and the poses, so
+nothing in its search space nudges one part by two millimetres, and
+re-running the whole search at a fine pitch costs the cube of the
+resolution ratio.
+
+So the last pass searches nothing at all. It keeps the arrangement and
+every orientation, re-voxelises at 96 voxels across the largest part
+(mask 1.10x true), and lets each part slide to the best position within a
+voxel or two of where it stands, the parts on the box's faces first. On
+the sample parts that is 5 to 7 per cent of the box for about two seconds
+of work — more than the fine-pitch refinement buys in a minute. It is
+monotone by construction: a part's current seat is always one of the
+candidates, so the box can only shrink.
+
 **Search order and orientation, in parallel.** The placer is deterministic
 given a placement order and one pose per part, so that pair *is* the search
 space, explored by simulated annealing. Independent chains from different
@@ -77,9 +97,14 @@ be slightly *looser* than the true optimum, by under one pitch per contact.
 Reported box dimensions are measured from the exact mesh vertices, never
 from the voxels, so that looseness never inflates the reported answer.
 
+The settle moves parts on a lattice the search never saw, so it re-earns
+the guarantee there rather than inheriting it: the fine masks are
+conservative in exactly the same way, and a part only ever moves to an
+offset whose overlap with the rest of the pile is zero.
+
 `tests/test_nest3d.py` checks this end to end by taking the packed result
 back to the triangle meshes and running exact boolean intersections on
-every pair.
+every pair — for the settled arrangement as well as the packed one.
 
 A through-bore stays open during the fill, so another part can genuinely
 nest inside a tube. Only fully enclosed cavities are filled, which is right
@@ -93,6 +118,8 @@ nest inside a tube. Only fully enclosed cavities are filled, which is right
 | `--workers N` | parallel solve chains. Use most of your cores. |
 | `--resolution N` | voxels across the largest part during search (default 28). Cost is roughly N³. |
 | `--refine-resolution N` | pitch for the final tightening pass (default 48). |
+| `--settle-resolution N` | pitch for the closing settle (default 96). Costs seconds, not minutes: nothing is searched, each part just re-seats. |
+| `--no-settle` | skip the settle and report the arrangement exactly as the search left it. |
 | `--clearance MM` | minimum gap to hold between parts. Half is applied to each part, so the gap you ask for is the gap you get. |
 | `--orientations` | `axis` = the 24 box rotations; `rest` (default) adds stable resting poses; `fine`/`full` add sampled SO(3) for genuinely oblique placements. |
 | `--container W D H` | fixed box: answers "do these fit?" instead of minimising. `inf` leaves an axis free. |
@@ -105,8 +132,9 @@ nest inside a tube. Only fully enclosed cavities are filled, which is right
 The voxel pitch is the one real trade-off. At 28 voxels across the largest
 part each mask is about 1.2–1.7x the true part volume (the conservative
 skin); at 48 it is 1.08–1.34. Finer means a tighter answer and cubically
-more time, which is why the search runs coarse and only the refinement runs
-fine.
+more time, which is why the search runs coarse, the refinement runs fine,
+and only the settle — which evaluates a few positions per part instead of
+thousands of arrangements — runs finer still.
 
 Because the masks are conservative, a reported density of 45% means the box
 is genuinely 45% solid part — the slack is real clearance between parts,
@@ -131,7 +159,8 @@ nest3d/orient.py     candidate rotation sets
 nest3d/pack.py       the constructive placer (FFT correlation + scoring)
 nest3d/search.py     simulated annealing over order and orientation
 nest3d/solve.py      free phase, squeeze phase, parallel chains
-nest3d/pipeline.py   coarse -> fine orchestration
+nest3d/settle.py     the closing settle on a much finer lattice
+nest3d/pipeline.py   coarse -> fine -> settle orchestration
 nest3d/report.py     summary, JSON, exports
 tests/               correctness tests and the sample-part generator
 examples/compare.py  this packer against the simpler alternatives

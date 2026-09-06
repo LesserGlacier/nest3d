@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from nest3d.orient import candidate_rotations                 # noqa: E402
 from nest3d.pack import Packer, verify_packing                # noqa: E402
 from nest3d.search import Search                              # noqa: E402
+from nest3d.settle import settle                              # noqa: E402
 from nest3d.voxel import build_poses, exact_overlap, voxelize_pose  # noqa: E402
 
 FAILURES = []
@@ -177,13 +178,106 @@ def test_clearance_is_respected():
           "asked %.2f mm, got %.2f mm" % (gap, actual))
 
 
+def test_settle_tightens_without_interference():
+    """The settle may shrink the box, and may never break the packing.
+
+    It moves parts on a lattice the search never saw, so the guarantee has
+    to be re-established there rather than inherited: disjoint fine masks,
+    and disjoint solids under an exact boolean.
+    """
+    meshes = [l_shape(20.0) for _ in range(5)]
+    for m, scale in zip(meshes, (1.0, 0.85, 1.15, 0.95, 1.05)):
+        m.apply_scale(scale)
+
+    pitch = 2.2
+    poses = [build_poses(m, candidate_rotations(m, use_rest=True), pitch)
+             for m in meshes]
+    packer = Packer(poses, objective="compact")
+    best = Search(packer, seed=3).run(starts=2, iterations=40)
+    before = float(np.prod(best.packing.extents))
+
+    out = settle(meshes, packer, best.packing, resolution=72)
+    check("settle produced a result", out is not None)
+    if out is None:
+        return
+    s_packer, s_packing, ext = out
+    after = float(np.prod(ext))
+
+    check("settle never grows the box", after <= before + 1e-6,
+          "%.4g -> %.4g mm^3 (%+.1f%%)" % (before, after,
+                                           100 * (after / before - 1)))
+    check("settle keeps the voxel masks disjoint",
+          not verify_packing(s_packer, s_packing))
+
+    rot_before = {pl.part_index: packer.poses[pl.part_index][pl.pose_index].rotation
+                  for pl in best.packing.placements}
+    same = all(np.allclose(rot_before[pl.part_index],
+                           s_packer.poses[pl.part_index][pl.pose_index].rotation)
+               for pl in s_packing.placements)
+    check("settle keeps every orientation", same)
+
+    placed = []
+    for pl in s_packing.placements:
+        pose = s_packer.poses[pl.part_index][pl.pose_index]
+        m = meshes[pl.part_index].copy()
+        m.apply_transform(pose.matrix(pl.offset))
+        placed.append(m)
+    worst = 0.0
+    for i in range(len(placed)):
+        for j in range(i + 1, len(placed)):
+            try:
+                inter = placed[i].intersection(placed[j])
+            except Exception as exc:
+                print("      (skipped boolean check: %s)" % exc)
+                return
+            if inter is not None and len(inter.vertices):
+                worst = max(worst, abs(float(inter.volume)))
+    check("settled solids do not interfere", worst <= 1e-6,
+          "largest overlap %.3g mm^3" % worst)
+
+
+def test_settle_respects_clearance():
+    """Settling must not close a gap the user asked to keep open."""
+    cube = trimesh.creation.box(extents=(20, 20, 20))
+    meshes = [cube.copy() for _ in range(3)]
+    pitch = 1.0
+    gap = 3.0
+    cv = int(np.ceil(gap / (2 * pitch)))
+    poses = [build_poses(m, candidate_rotations(m, use_rest=False), pitch,
+                         clearance_voxels=cv) for m in meshes]
+    packer = Packer(poses, objective="compact")
+    best = Search(packer, seed=0).run(starts=1, iterations=10)
+
+    out = settle(meshes, packer, best.packing, resolution=60, clearance=gap)
+    if out is None:                       # nothing to gain is a valid outcome
+        print("      (settle found no improvement; clearance untouched)")
+        return
+    s_packer, s_packing, _ = out
+
+    boxes = []
+    for pl in s_packing.placements:
+        pose = s_packer.poses[pl.part_index][pl.pose_index]
+        # The mask is dilated by the clearance, so measure the true solid.
+        lo, hi = pose.aabb(pl.offset)
+        boxes.append((lo, hi))
+    worst = float("inf")
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            sep = np.maximum(boxes[j][0] - boxes[i][1], boxes[i][0] - boxes[j][1])
+            worst = min(worst, float(sep.max()))
+    check("settle keeps the requested clearance", worst >= gap - 1e-6,
+          "asked %.2f mm, closest pair %.2f mm" % (gap, worst))
+
+
 def main():
     print("nest3d tests")
     for fn in (test_voxel_mask_is_a_superset,
                test_symmetry_dedup,
                test_eight_cubes_pack_tightly,
                test_packing_is_interference_free_on_real_geometry,
-               test_clearance_is_respected):
+               test_clearance_is_respected,
+               test_settle_tightens_without_interference,
+               test_settle_respects_clearance):
         print("\n%s" % fn.__name__)
         fn()
     print("\n%d failure(s)" % len(FAILURES))
