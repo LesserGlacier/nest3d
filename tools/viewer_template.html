@@ -83,7 +83,7 @@
   #title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 2px; }
   #subtitle { color: var(--muted); font-size: 12px; margin: 0; }
 
-  .modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 10px; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; }
   .modes button {
     font: inherit; font-size: 11px; font-weight: 600;
     padding: 7px 4px; cursor: pointer; color: var(--muted);
@@ -194,6 +194,7 @@
       <button id="m-best" aria-pressed="true">Ladder</button>
       <button id="m-search" aria-pressed="false">Walk</button>
       <button id="m-build" aria-pressed="false">Build</button>
+      <button id="m-pack" aria-pressed="false">Pack</button>
     </div>
     <p id="modehelp"></p>
   </div>
@@ -249,7 +250,8 @@
   var HELP = {
     best: "Every improvement found across all 20 parallel chains, ordered worst to best. Ends on the arrangement actually chosen. Ordered by quality, not by time.",
     search: "One chain's real walk through the search, in time order. It accepts worse boxes on purpose so it can climb out of a local optimum — watch it settle, jump, and re-settle.",
-    build: "The winning arrangement assembled in placement order. Watch which part forces the box open."
+    build: "The winning arrangement in the order the algorithm placed it, largest first, with the box growing. Shows which part forces the box open.",
+    pack: "Loading order for the real carton: lowest piece first, box fixed at final size. Ordered by height, not verified for insertion clearance — a piece may still need to go in at an angle."
   };
 
   // ---- scene -------------------------------------------------------
@@ -343,9 +345,12 @@
         .cross(camera.up).normalize();
       var up = new THREE.Vector3().crossVectors(right,
         new THREE.Vector3().subVectors(camera.position, target)).normalize();
+      // `right` here is cross(toCamera, up), which points screen-LEFT, so
+      // positive dx must be added, not subtracted, for the model to follow
+      // the cursor rather than run away from it.
       var k = radius * 0.0016;
-      target.addScaledVector(right, -dx * k);
-      target.addScaledVector(up, -dy * k);
+      target.addScaledVector(right, dx * k);
+      target.addScaledVector(up, dy * k);
     }
     place();
   });
@@ -387,6 +392,7 @@
 
   function frameCount() {
     if (mode === "build") return buildFrame ? buildFrame.order.length : 0;
+    if (mode === "pack") return packOrder.length;
     return tracks[mode].length;
   }
 
@@ -423,6 +429,40 @@
     return { lo: lo, ext: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] };
   }
 
+  function partAABB(fr, i) {
+    var m = fr.m[i]; if (!m) return null;
+    var v = localVerts[i];
+    var lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (var k = 0; k < v.length; k += 3) {
+      var x = v[k], y = v[k + 1], z = v[k + 2];
+      var w = [m[0] * x + m[1] * y + m[2] * z + m[3],
+               m[4] * x + m[5] * y + m[6] * z + m[7],
+               m[8] * x + m[9] * y + m[10] * z + m[11]];
+      for (var a = 0; a < 3; a++) {
+        if (w[a] < lo[a]) lo[a] = w[a];
+        if (w[a] > hi[a]) hi[a] = w[a];
+      }
+    }
+    return { lo: lo, hi: hi };
+  }
+
+  // Loading order for a real carton: lowest piece in first.  This is not
+  // the algorithm's placement order, which goes largest-first and can ask
+  // you to put a small piece in under a big one already sitting on it.
+  var packOrder = [], packBoxes = [];
+  function precomputePack() {
+    packOrder = []; packBoxes = [];
+    if (!buildFrame) return;
+    var rows = [];
+    for (var i = 0; i < N; i++) {
+      var bb = partAABB(buildFrame, i);
+      if (bb) rows.push({ i: i, lo: bb.lo[2], mid: (bb.lo[2] + bb.hi[2]) / 2 });
+    }
+    rows.sort(function (a, b) { return (a.lo - b.lo) || (a.mid - b.mid); });
+    packOrder = rows.map(function (r) { return r.i; });
+    packBoxes = rows.map(function (r) { return r.lo; });
+  }
+
   function precomputeBuild() {
     buildAABBs = [];
     if (!buildFrame) return;
@@ -435,7 +475,12 @@
 
   function render(i) {
     var fr, lo, ext, revealed = null;
-    if (mode === "build") {
+    if (mode === "pack") {
+      if (!buildFrame) return;
+      fr = buildFrame;
+      revealed = packOrder.slice(0, i + 1);
+      lo = buildFrame.lo; ext = buildFrame.ext;   // carton is fixed size
+    } else if (mode === "build") {
       if (!buildFrame) return;
       fr = buildFrame;
       revealed = buildFrame.order.slice(0, i + 1);
@@ -479,9 +524,14 @@
       Math.max(0, Math.min(100, 100 * den)) + "%";
 
     var total = frameCount();
-    var phase = (mode === "build") ? "place" : fr.phase;
+    var phase = (mode === "build") ? "place"
+              : (mode === "pack") ? "load" : fr.phase;
     var lbl;
-    if (mode === "build") {
+    if (mode === "pack") {
+      lbl = "step " + (i + 1) + " / " + total + " · " +
+            DATA.parts[packOrder[i]].name + " · base at " +
+            (packBoxes[i] - buildFrame.lo[2]).toFixed(0) + " mm";
+    } else if (mode === "build") {
       lbl = "part " + (i + 1) + " / " + total + " · " +
             DATA.parts[buildFrame.order[i]].name;
     } else {
@@ -496,6 +546,11 @@
   }
 
   function fitCamera() {
+    if (mode === "pack" && buildFrame) {
+      var e = buildFrame.ext;
+      autoR = Math.sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]) * 1.75;
+      radius = autoR; place(); return;
+    }
     var ref = (mode === "build" && buildAABBs.length)
       ? buildAABBs[buildAABBs.length - 1]
       : (tracks.best.length ? { ext: tracks.best[0].ext } : { ext: [400, 400, 400] });
@@ -508,7 +563,7 @@
   function buildTicks() {
     var host = document.getElementById("ticks");
     host.innerHTML = "";
-    if (mode === "build") return;
+    if (mode === "build" || mode === "pack") return;
     var arr = tracks[mode], total = arr.length;
     if (total < 2) return;
     arr.forEach(function (fr, i) {
@@ -522,14 +577,14 @@
   // ---- UI ------------------------------------------------------------
   function setMode(next) {
     mode = next;
-    ["best", "search", "build"].forEach(function (k) {
+    ["best", "search", "build", "pack"].forEach(function (k) {
       document.getElementById("m-" + k)
         .setAttribute("aria-pressed", String(k === next));
     });
     document.getElementById("modehelp").textContent = HELP[next];
     idx = 0; buildTicks(); fitCamera(); render(idx);
   }
-  ["best", "search", "build"].forEach(function (k) {
+  ["best", "search", "build", "pack"].forEach(function (k) {
     document.getElementById("m-" + k).addEventListener("click", function () {
       setMode(k);
     });
@@ -612,10 +667,11 @@
     wb.disabled = true; wb.style.opacity = ".45"; wb.style.cursor = "default";
   }
   precomputeBuild();
+  precomputePack();
   resize();
   setMode("best");
 
-  var speed = { best: 700, search: 110, build: 520 };
+  var speed = { best: 700, search: 110, build: 520, pack: 900 };
   function loop(now) {
     requestAnimationFrame(loop);
     if (playing) {
