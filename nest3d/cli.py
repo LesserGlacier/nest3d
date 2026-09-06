@@ -12,7 +12,8 @@ import numpy as np
 
 from . import __version__
 from .pipeline import ORIENTATION_PRESETS, run
-from .report import summary, write_outputs
+from .report import boolean_verify, summary, write_outputs
+from .shipping import report as shipping_report
 
 
 def _expand(patterns):
@@ -84,6 +85,22 @@ def build_parser():
     p.add_argument("--formats", default="json,step,stl",
                    help="comma-separated subset of json,step,stl")
     p.add_argument("--unit", default="mm", help="label only (default: mm)")
+    p.add_argument("--snapshot", action="store_true",
+                   help="with --out, write results after each phase instead "
+                        "of only at the end, so a long run is inspectable "
+                        "while it is still going")
+    p.add_argument("--shipping", action="store_true",
+                   help="report carton size, girth and dimensional weight")
+    p.add_argument("--padding", type=float, default=0.0,
+                   help="padding all round inside the carton, model units")
+    p.add_argument("--wall", type=float, default=5.0,
+                   help="carton wall thickness, model units (default 5)")
+    p.add_argument("--weight", type=float,
+                   help="actual shipped weight in kg, to see whether "
+                        "dimensional weight governs")
+    p.add_argument("--verify", action="store_true",
+                   help="additionally check the placed solids for "
+                        "interference with exact CAD booleans")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--version", action="version", version="nest3d " + __version__)
     return p
@@ -108,6 +125,18 @@ def main(argv=None):
     if args.objective in ("height", "fit") and container is None:
         raise SystemExit("--objective %s needs --container" % args.objective)
 
+    formats = tuple(f.strip() for f in args.formats.split(",") if f.strip())
+
+    def on_phase(name, partial):
+        ext = np.asarray(partial.result.extents, dtype=float)
+        print("  [%s] %.1f x %.1f x %.1f mm   vol %.4g"
+              % (name, ext[0], ext[1], ext[2], partial.result.volume),
+              flush=True)
+        if args.out and args.snapshot:
+            written = write_outputs(partial, args.out, formats, unit=args.unit)
+            print("  [%s] snapshot -> %s"
+                  % (name, ", ".join(str(w) for w in written)), flush=True)
+
     t0 = time.time()
     pr = run(paths,
              objective=args.objective,
@@ -124,15 +153,36 @@ def main(argv=None):
              refine=not args.no_refine,
              contact_weight=args.contact_weight,
              workers=args.workers,
-             verbose=not args.quiet)
+             verbose=not args.quiet,
+             on_phase=on_phase)
 
     print(summary(pr, unit=args.unit))
     print("\n  elapsed        %.1fs  (%s)"
           % (time.time() - t0,
              ", ".join("%s %.1fs" % kv for kv in pr.timings.items())))
 
+    if args.shipping:
+        print(shipping_report(np.asarray(pr.result.extents, dtype=float),
+                              pr.result.lower_bound,
+                              padding_mm=args.padding, wall_mm=args.wall,
+                              actual_weight_kg=args.weight, unit=args.unit))
+
+    if args.verify:
+        check = boolean_verify(pr)
+        print()
+        if check is None:
+            print("  boolean check unavailable (pip install manifold3d)")
+        elif check["offenders"]:
+            print("  BOOLEAN CHECK FAILED: %d interfering pair(s), largest %.6g"
+                  % (len(check["offenders"]), check["worst_volume"]))
+            for a, b, v in check["offenders"]:
+                print("      %s / %s : %.6g" % (a, b, v))
+        else:
+            print("  boolean check  %d pairs, no interference "
+                  "(largest intersection %.3g)"
+                  % (check["pairs"], check["worst_volume"]))
+
     if args.out:
-        formats = tuple(f.strip() for f in args.formats.split(",") if f.strip())
         written = write_outputs(pr, args.out, formats, unit=args.unit)
         print()
         for w in written:

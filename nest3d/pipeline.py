@@ -68,7 +68,8 @@ def build_orientations(parts, preset="rest", n_random=None, seed=0, log=None):
 def run(paths, objective="volume", resolution=28, refine_resolution=48,
         pitch=None, clearance=0.0, orientations="rest", n_random=None,
         container=None, time_budget=120.0, seed=0, split_solids=False,
-        refine=True, contact_weight=0.0, workers=1, verbose=True):
+        refine=True, contact_weight=0.0, workers=1, verbose=True,
+        on_phase=None):
     """Load, orient, pack and refine.  Returns a PipelineResult."""
     log = []
 
@@ -115,15 +116,20 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
         # Fan out independent solve chains: different seeds land in
         # different basins, and that is the axis of this problem that
         # actually scales with cores.
+        # Chains run concurrently, so each gets the whole coarse budget:
+        # roughly a third to find a starting box, the rest to squeeze it.
         result = solve_multistart(
             poses, meshes=meshes, seed=seed,
-            budget=max(5.0, coarse_budget * 0.55),
+            free_budget=max(3.0, coarse_budget * 0.35),
+            budget=max(5.0, coarse_budget * 0.6),
             workers=workers, chains=max(workers, 3),
             contact_weight=contact_weight, say=say)
         say("  coarse best %s mm   vol %.4g   density %4.1f%%"
             % (" x ".join("%7.1f" % v for v in result.extents), result.volume,
                100 * result.density))
     timings["coarse"] = time.time() - t0
+    if on_phase is not None:
+        on_phase("coarse", _assemble(parts, result))
 
     kept_rotations = [[p.rotation for p in ps] for ps in poses]
     final_poses = poses
@@ -144,6 +150,8 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
             result = refined
             final_poses = fine_poses
             final_pitch = fine_pitch
+            if on_phase is not None:
+                on_phase("refine", _assemble(parts, result, fine_pitch))
         else:
             say("  refine      no improvement, keeping the coarse result")
 
@@ -157,6 +165,19 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
     return PipelineResult(parts=parts, result=result, poses=final_poses,
                           pitch=final_pitch, transforms=transforms,
                           overlaps=overlaps, timings=timings, log=log)
+
+
+def _assemble(parts, result, pitch=None):
+    """Package a result as a PipelineResult, for snapshots mid-run."""
+    transforms = [None] * len(parts)
+    for pl in result.packing.placements:
+        pose = result.packer.poses[pl.part_index][pl.pose_index]
+        transforms[pl.part_index] = pose.matrix(pl.offset)
+    return PipelineResult(
+        parts=parts, result=result, poses=result.packer.poses,
+        pitch=pitch if pitch is not None else result.packer.pitch,
+        transforms=transforms,
+        overlaps=verify_packing(result.packer, result.packing))
 
 
 def _solve_fixed_container(poses, meshes, container, objective, seed,
@@ -202,7 +223,12 @@ def _refine(fine_poses, meshes, coarse, seed, budget, contact_weight,
     if len(order) != len(fine_poses):
         return None
 
-    iterations = max(40, int(budget * 0.35 / 0.12))
+    # A generous cap, actually bounded by the clock below.  Deriving an
+    # iteration count from an assumed cost per evaluation is what made
+    # --time advisory rather than binding: an evaluation costs an order of
+    # magnitude more at the fine pitch than at the coarse one.
+    iterations = 5000
+    deadline = time.time() + budget * 0.35
 
     # Try the coarse box itself as the container first.  The fine masks are
     # strictly tighter than the coarse ones, so if anything fits there it
@@ -218,7 +244,7 @@ def _refine(fine_poses, meshes, coarse, seed, budget, contact_weight,
                 (coarse.objective, near, iterations),
                 ("volume", near, iterations),
                 (coarse.objective, coarse.container, iterations),
-                ("compact", None, 60)]
+                ("compact", None, iterations)]
 
     seeded = None
     packer = None
@@ -226,7 +252,7 @@ def _refine(fine_poses, meshes, coarse, seed, budget, contact_weight,
         packer = Packer(fine_poses, objective=objective, container=container,
                         contact_weight=contact_weight)
         seeded = Search(packer, seed=seed + 7).anneal(
-            tuple(order), tuple(choice), iterations=iters)
+            tuple(order), tuple(choice), iterations=iters, deadline=deadline)
         if seeded.packing.feasible:
             break
     if seeded is None or not seeded.packing.feasible:

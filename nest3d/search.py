@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -103,12 +104,20 @@ class Search:
         return tuple(order), tuple(pose_choice)
 
     def anneal(self, order, pose_choice, iterations=400, t_start=0.06,
-               t_end=0.002, callback=None):
-        """Anneal from one start.  Temperatures are fractions of the score."""
+               t_end=0.002, callback=None, deadline=None):
+        """Anneal from one start.  Temperatures are fractions of the score.
+
+        ``deadline`` is an absolute time.time() value.  It exists because
+        an iteration count is not a time budget: the cost of one evaluation
+        varies by an order of magnitude with the voxel pitch, so a loop
+        sized for the coarse pass will overrun badly at the fine one.
+        """
         cur = self.evaluate(order, pose_choice)
         best = cur
 
         for it in range(iterations):
+            if deadline is not None and time.time() > deadline:
+                break
             frac = it / max(iterations - 1, 1)
             temp = t_start * (t_end / t_start) ** frac
             cand_order, cand_poses = self._mutate(cur.order, cur.pose_choice)
@@ -124,7 +133,8 @@ class Search:
                 callback(it, iterations, best.score, cur.score)
         return best
 
-    def run(self, starts=4, iterations=400, callback=None, warm=None):
+    def run(self, starts=4, iterations=400, callback=None, warm=None,
+            deadline=None):
         """Anneal from several starts and keep the best.
 
         ``warm`` is a list of (order, pose_choice) pairs to start from --
@@ -148,12 +158,15 @@ class Search:
 
         best = None
         for si, (order, choice) in enumerate(entries):
+            if deadline is not None and time.time() > deadline and best is not None:
+                break
+
             def cb(it, tot, b, c, si=si):
                 if callback is not None:
                     callback(si, len(entries), it, tot, b, c)
 
             result = self.anneal(order, choice, iterations=iterations,
-                                 callback=cb)
+                                 callback=cb, deadline=deadline)
             if best is None or result.score < best.score:
                 best = result
         return best

@@ -127,3 +127,33 @@ def write_outputs(pr, out_dir, formats=("json", "step", "stl"), unit="mm"):
         written.append(Path(path))
 
     return written
+
+
+def boolean_verify(pr, tolerance=1e-6):
+    """Exact interference check on the placed solids themselves.
+
+    The voxel masks are conservative supersets, so disjoint masks already
+    imply disjoint solids.  This re-derives that from the geometry with a
+    CAD boolean instead, which is the statement worth quoting when the
+    output is going to be cut or cast.  Needs manifold3d; returns None if
+    the boolean backend is unavailable.
+    """
+    placed = [(p, m) for p, m in zip(pr.parts, pr.transforms) if m is not None]
+    meshes = [(p.name, p.transformed(m)) for p, m in placed]
+
+    worst = 0.0
+    offenders = []
+    for i in range(len(meshes)):
+        for j in range(i + 1, len(meshes)):
+            try:
+                inter = meshes[i][1].intersection(meshes[j][1])
+            except Exception:
+                return None
+            vol = 0.0
+            if inter is not None and len(getattr(inter, "vertices", [])):
+                vol = abs(float(inter.volume))
+            if vol > tolerance:
+                offenders.append((meshes[i][0], meshes[j][0], vol))
+            worst = max(worst, vol)
+    return {"pairs": len(meshes) * (len(meshes) - 1) // 2,
+            "worst_volume": worst, "offenders": offenders}

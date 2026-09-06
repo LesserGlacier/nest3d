@@ -119,9 +119,10 @@ def _search_aspect(poses, job):
     best_dims = None
     bracketed = False
     t0 = time.time()
+    job_end = t0 + job.deadline
 
     for step in range(job.steps):
-        if time.time() - t0 > job.deadline:
+        if time.time() > job_end:
             break
         if hi / max(lo, 1e-9) < 1.0 + job.min_gain:
             break
@@ -132,8 +133,12 @@ def _search_aspect(poses, job):
 
         packer = Packer(poses, objective="volume", container=dims,
                         contact_weight=job.contact_weight)
+        # The inner anneal needs the deadline too: checking only between
+        # steps lets a single step overrun by a whole annealing run, which
+        # is what made --time advisory rather than binding.
         sol = Search(packer, seed=job.seed + step).run(
-            starts=job.starts, iterations=job.iterations, warm=warm)
+            starts=job.starts, iterations=job.iterations, warm=warm,
+            deadline=job_end)
 
         if sol is None or not sol.packing.feasible:
             lo = target
@@ -210,11 +215,14 @@ class Solver:
             print(msg, flush=True)
 
     # ------------------------------------------------------------------
-    def free_phase(self, starts=3, iterations=120, objective="compact"):
+    def free_phase(self, starts=3, iterations=120, objective="compact",
+                   budget=None):
         packer = Packer(self.poses, objective=objective,
                         contact_weight=self.contact_weight)
         search = Search(packer, seed=self.seed)
-        best = search.run(starts=starts, iterations=iterations)
+        deadline = None if budget is None else time.time() + budget
+        best = search.run(starts=starts, iterations=iterations,
+                          deadline=deadline)
         if best is None or not best.packing.feasible:
             raise RuntimeError("free packing failed; check the input geometry")
         ext = best.packing.extents
@@ -309,9 +317,11 @@ class Solver:
 
     # ------------------------------------------------------------------
     def solve(self, free_starts=3, free_iterations=120, squeeze_budget=90.0,
-              squeeze_starts=2, squeeze_iterations=60, workers=1, rounds=3):
+              squeeze_starts=2, squeeze_iterations=60, workers=1, rounds=3,
+              free_budget=None):
         packer, best = self.free_phase(starts=free_starts,
-                                       iterations=free_iterations)
+                                       iterations=free_iterations,
+                                       budget=free_budget)
         ext = best.packing.extents
 
         sq_packer, sq_best, sq_ext, history = self.squeeze(
@@ -343,7 +353,8 @@ def _fmt(ext):
 # ---------------------------------------------------------------------------
 
 def _chain(poses, part_vol, seed, budget, contact_weight, free_starts,
-           free_iterations, squeeze_starts, squeeze_iterations, rounds):
+           free_iterations, squeeze_starts, squeeze_iterations, rounds,
+           free_budget=None):
     solver = Solver(poses, meshes=None, seed=seed, verbose=False,
                     contact_weight=contact_weight)
     solver.part_volume = part_vol
@@ -352,7 +363,7 @@ def _chain(poses, part_vol, seed, budget, contact_weight, free_starts,
                        squeeze_budget=budget,
                        squeeze_starts=squeeze_starts,
                        squeeze_iterations=squeeze_iterations,
-                       workers=1, rounds=rounds)
+                       workers=1, rounds=rounds, free_budget=free_budget)
     container = None if res.container is None else [float(v) for v in res.container]
     return float(res.volume), res.config, container, res.objective
 
@@ -367,7 +378,8 @@ def _chain_worker(args):
 def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
                      chains=None, contact_weight=0.0, free_starts=3,
                      free_iterations=120, squeeze_starts=2,
-                     squeeze_iterations=60, rounds=2, say=None):
+                     squeeze_iterations=60, rounds=2, say=None,
+                     free_budget=None):
     """Run several independent solve chains and keep the best.
 
     Each chain is a complete free-then-squeeze solve from its own random
@@ -379,17 +391,47 @@ def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
     pv = part_volume(poses, meshes)
     chains = chains or max(workers, 1)
     args = [(pv, seed + 977 * k, budget, contact_weight, free_starts,
-             free_iterations, squeeze_starts, squeeze_iterations, rounds)
+             free_iterations, squeeze_starts, squeeze_iterations, rounds,
+             free_budget)
             for k in range(chains)]
 
+    def note(k, total, out):
+        if say is None:
+            return
+        if out is None:
+            say("    chain %2d/%d  failed" % (k, total))
+        else:
+            say("    chain %2d/%d  vol %.4g   best so far %.4g"
+                % (k, total, out[0], note.best))
+
+    note.best = float("inf")
+
+    outs = []
     if workers <= 1 or chains == 1:
-        outs = [_chain(poses, *a) for a in args]
+        for k, a in enumerate(args):
+            out = _chain(poses, *a)
+            outs.append(out)
+            if out is not None:
+                note.best = min(note.best, out[0])
+            note(k + 1, chains, out)
     else:
-        from concurrent.futures import ProcessPoolExecutor
+        # as_completed rather than map: results are reported the moment each
+        # chain lands, so a long run shows progress instead of going silent
+        # until every chain has finished.
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         with ProcessPoolExecutor(max_workers=min(workers, chains),
                                  initializer=_init_worker,
                                  initargs=(poses,)) as pool:
-            outs = list(pool.map(_chain_worker, args))
+            futures = [pool.submit(_chain_worker, a) for a in args]
+            for k, fut in enumerate(as_completed(futures)):
+                try:
+                    out = fut.result()
+                except Exception:
+                    out = None
+                outs.append(out)
+                if out is not None:
+                    note.best = min(note.best, out[0])
+                note(k + 1, chains, out)
 
     outs = [o for o in outs if o is not None]
     if not outs:
