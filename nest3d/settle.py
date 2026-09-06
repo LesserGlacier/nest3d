@@ -24,17 +24,35 @@ part, seconds rather than minutes, and it recovers 5 to 7 per cent of the
 box on the sample parts -- more than the fine-pitch refinement pass buys
 for twenty times the time.
 
+Two things the sweep alone will not do
+-------------------------------------
+It stops at a one-part-move optimum: a box can be held open by three parts
+that each need one of the others to move first, and no single re-seat sees
+that.  Tipping the box is the cheap half of an answer -- the objective is
+flat while a part stays inside the box, so a part can be slid to one wall
+for free, and the slack it leaves behind is somewhere a face part can then
+move into.  It is worth about a point of density when it works and nothing
+at all when it does not, which is why it is the last thing tried.
+
+And it converges somewhere different on every lattice.  A finer one has a
+thinner skin to give back, but the parts also round onto it differently,
+so finer is a tendency and not a rule.  Rather than pick, run several and
+keep the smallest box -- see LADDER.
+
 Guarantees
 ----------
 The settle inherits the packer's no-overlap guarantee unchanged: the fine
 masks are conservative supersets of the true solids in exactly the same
 way, and a part is only ever moved to an offset whose mask overlap with
-the rest of the pile is zero.
+the rest of the pile is zero.  That holds on every lattice tried, each of
+which re-earns it independently.
 
 It is also monotone.  Each part is lifted out and re-seated by minimising
 the objective over a window centred on where it already is, so the
 position it is standing in is always one of the candidates -- the box can
-only shrink or stay the same, never grow.
+only shrink or stay the same, never grow.  The tipping passes are held to
+the same rule: an offset is a candidate only if it leaves the box no worse
+than it already is.
 """
 from __future__ import annotations
 
@@ -53,6 +71,19 @@ EXTRA_WINDOW = 3
 
 # Candidate offsets scored for contact when several tie on the objective.
 CONTACT_POOL = 256
+
+# Directions the box is tipped in, in order, once the objective sweeps have
+# run out of moves.  Faces first, then the corners: tipping along an axis
+# consolidates the slack against one wall, and the diagonals are what
+# actually break an arch, where three parts hold each other up over a void
+# and no single one of them can move on its own.
+SHAKE_CYCLES = 2
+
+SHAKE_DIRS = (
+    (0, 0, -1), (-1, 0, 0), (0, -1, 0),
+    (0, 0, 1), (1, 0, 0), (0, 1, 0),
+    (-1, -1, -1), (1, 1, 1),
+)
 
 
 def _measure(objective, ext):
@@ -156,8 +187,14 @@ def _transfer(packing, packer, fine, pile, margin):
     return offsets
 
 
-def _reseat(pile, fine, offsets, part, window, objective, container, dilated):
-    """Best offset for one part, over a window centred on where it is now."""
+def _fields(pile, fine, offsets, part, window, objective, container):
+    """Score the free offsets in a window around a part's current seat.
+
+    Returns ``(lo, score, volume)`` over the offset box, with ``inf`` where
+    the part would overlap the rest of the pile.  ``volume`` is the box
+    volume the same offsets produce, which is what breaks ties under
+    ``--objective height`` -- see ``_measure``.
+    """
     pose = fine[part]
     pad = pose.pad
     ext_v = pose.extents / pose.pitch
@@ -166,10 +203,10 @@ def _reseat(pile, fine, offsets, part, window, objective, container, dilated):
     lo = np.maximum(here - window, 0)
     hi = np.minimum(here + window, pile.shape - pose.shape)
     if np.any(hi < lo):
-        return here
+        return None
     free = pile.free_offsets(pose, lo, hi)
     if not free.any():
-        return here
+        return None
 
     keep_lo, keep_hi = _bbox(fine, offsets, skip=part)
     spans = []
@@ -180,37 +217,93 @@ def _reseat(pile, fine, offsets, part, window, objective, container, dilated):
         spans.append((h - l) * pose.pitch)
 
     score = np.where(free, _score_field(objective, spans, container), np.inf)
+    volume = np.where(free, _score_field("volume", spans, None), np.inf)
+    return lo, score, volume
+
+
+def _hug(pile, dilated, cand, here):
+    """Of several equal offsets, the one hugging the pile hardest.
+
+    That is what makes this a settle rather than a re-shuffle: it
+    consolidates the slack instead of moving it around.  Distance from the
+    part's current seat breaks the remaining ties, so a part that has
+    nothing to gain stays where it is.
+    """
+    if len(cand) == 1:
+        return cand[0]
+    cand = cand[:CONTACT_POOL]
+    touch = np.array([pile.contact(dilated, c) for c in cand])
+    tied = np.argwhere(touch == touch.max()).ravel()
+    return cand[tied[int(np.argmin(np.abs(cand[tied] - here).sum(axis=1)))]]
+
+
+def _reseat(pile, fine, offsets, part, window, objective, container, dilated):
+    """Best offset for one part, over a window centred on where it is now."""
+    here = offsets[part]
+    got = _fields(pile, fine, offsets, part, window, objective, container)
+    if got is None:
+        return here
+    lo, score, volume = got
+
     best = float(score.min())
     if not np.isfinite(best):
         return here
 
-    cand = np.argwhere(score <= best * (1 + 1e-12)) + lo
-    if len(cand) == 1:
-        return cand[0]
-    # Among positions that leave the same box, take the one hugging the
-    # pile hardest.  That is what makes this a settle rather than a
-    # re-shuffle: it consolidates the slack instead of moving it around.
-    cand = cand[:CONTACT_POOL]
-    touch = np.array([pile.contact(dilated, c) for c in cand])
-    tied = np.argwhere(touch == touch.max()).ravel()
-    pick = cand[tied[int(np.argmin(np.abs(cand[tied] - here).sum(axis=1)))]]
-    return pick
+    at = score <= best * (1 + 1e-12)
+    # Under --objective height many offsets tie on the stack height, and a
+    # smaller footprint at the same height is a real improvement -- but a
+    # larger one is a real loss, and _measure would throw the whole settle
+    # away for it.  So volume decides here too, exactly as it does there.
+    vbest = float(volume[at].min())
+    at &= volume <= vbest * (1 + 1e-12)
+    return _hug(pile, dilated, np.argwhere(at) + lo, here)
 
 
-def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
-           budget=None, say=None):
-    """Shake a finished arrangement down onto a finer lattice.
+def _shake(pile, fine, offsets, part, window, objective, container, dilated,
+           direction):
+    """Slide one part as far as it will go along ``direction``, for free.
 
-    Returns ``(packer, packing, extents)`` for the settled arrangement, or
-    ``None`` if it could not improve on the one it was given.
+    The objective is flat inside the box: while a part stays within the
+    current bounding box, every position it could take scores the same, so
+    the objective sweep has no reason to prefer any of them and stops.  The
+    slack it leaves is real all the same, and where it sits decides whether
+    the next part can move.
+
+    So tip the box.  Only offsets that leave the box no worse than it is
+    now are candidates, which keeps the pass monotone; among those, take
+    the one furthest along ``direction``.  Nothing improves on this pass by
+    itself -- it moves the voids to one wall so that the objective sweep
+    after it has somewhere to shrink into.
     """
-    if len(packing.placements) < 2:
-        return None
-    if len(packing.placements) != len(packer.poses):
-        # A partial packing has no settled arrangement to speak of, and the
-        # fine pose list below would not line up with the part list.
-        return None
+    here = offsets[part]
+    got = _fields(pile, fine, offsets, part, window, objective, container)
+    if got is None:
+        return here
+    lo, score, volume = got
 
+    at_here = tuple(here - lo)
+    now, now_vol = float(score[at_here]), float(volume[at_here])
+    if not np.isfinite(now):
+        return here
+
+    ok = (score <= now * (1 + 1e-12)) & (volume <= now_vol * (1 + 1e-12))
+    cand = np.argwhere(ok) + lo
+    if len(cand) <= 1:
+        return here
+
+    travel = cand @ np.asarray(direction, dtype=float)
+    tied = cand[travel <= float(travel.min()) + 1e-9]
+    return _hug(pile, dilated, tied, here)
+
+
+def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
+                 deadline, shake):
+    """One settle, on one lattice.  The unit of work the ladder runs.
+
+    Returns ``(measure, packer, packing, extents, pitch)`` for the settled
+    arrangement, or ``None`` if this lattice could not improve on the
+    arrangement it was given.
+    """
     pitch = min(suggest_pitch(meshes, resolution), packer.pitch)
     clearance_voxels = (int(np.ceil(clearance / (2 * pitch)))
                         if clearance > 0 else 0)
@@ -236,17 +329,26 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
 
     offsets = _transfer(packing, packer, fine, pile, margin)
     if offsets is None:
-        if say is not None:
-            say("  settle      could not transfer to the fine lattice, skipped")
+        # Rounding onto this lattice put two parts through each other and
+        # there was no free seat nearby.  Another rung of the ladder will
+        # not have the same trouble, so this one just drops out.
         return None
 
     lo, hi = _bbox(fine, offsets)
     start = _measure(objective, hi - lo)
+    if deadline is not None and time.time() > deadline:
+        # Voxelising this rung alone ran the clock out; there is no time
+        # left to sweep with, and an unswept transfer is never an
+        # improvement on what came in.
+        return None
     dilated = {i: ndimage.binary_dilation(p.mask, np.ones((3, 3, 3), bool))
                for i, p in fine.items()}
-    deadline = None if budget is None else t0 + budget
 
-    for _ in range(sweeps):
+    def out_of_time():
+        return deadline is not None and time.time() > deadline
+
+    def sweep(pick):
+        """One pass over every part, re-seating each with ``pick``."""
         moved = 0
         lo, hi = _bbox(fine, offsets)
 
@@ -257,31 +359,56 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
         # Parts on the box's faces first: they are the only ones that can
         # shrink it, and freeing space behind them lets the rest follow.
         for part in sorted(offsets, key=lambda i: (on_face(i), i)):
-            if deadline is not None and time.time() > deadline:
+            if out_of_time():
                 break
             pose = fine[part]
             pile.paint(pose, offsets[part], on=False)
-            new = _reseat(pile, fine, offsets, part, window, objective,
-                          container, dilated[part])
+            new = pick(part)
             if not np.array_equal(new, offsets[part]):
                 moved += 1
                 offsets[part] = new
             pile.paint(pose, offsets[part])
-        if moved == 0 or (deadline is not None and time.time() > deadline):
+        return moved
+
+    def reseat_pass():
+        return sweep(lambda part: _reseat(pile, fine, offsets, part, window,
+                                          objective, container, dilated[part]))
+
+    def shake_pass(d):
+        return sweep(lambda part: _shake(pile, fine, offsets, part, window,
+                                         objective, container, dilated[part], d))
+
+    # Each direction is tipped at most twice: a second cycle is worth having
+    # because the first one's re-seats change what the same tip can reach,
+    # and a third almost never moves anything.
+    tips = list(SHAKE_DIRS) * SHAKE_CYCLES if shake else []
+    tipped = 0
+
+    for _ in range(sweeps + len(tips)):
+        if out_of_time():
+            break
+        if reseat_pass():
+            continue
+        # The objective sweep has run out of moves.  That does not mean the
+        # arrangement is tight -- only that no part can shrink the box on
+        # its own from where it stands.  Tip the box to change where it
+        # stands, and try again; stop once no tip left moves anything.
+        while tipped < len(tips) and not out_of_time():
+            d = tips[tipped]
+            tipped += 1
+            if shake_pass(d):
+                break
+        else:
             break
 
     lo, hi = _bbox(fine, offsets)
     ext = hi - lo
-    vol = float(np.prod(ext))
     now = _measure(objective, ext)
     # Judged on the objective that was actually being minimised: under
     # --objective height a shorter stack wins even if the footprint grows
     # inside its container, and a smaller footprint at the same height is
     # still worth having.
     if now >= start:
-        if say is not None:
-            say("  settle      no improvement (pitch %.2f mm, %.1fs)"
-                % (pitch, time.time() - t0))
         return None
 
     out_packer = Packer([[fine[i]] for i in range(len(packer.poses))],
@@ -290,14 +417,114 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
     out = out_packer.finalise(
         [Placement(i, 0, np.asarray(offsets[i], dtype=np.int64))
          for i in sorted(offsets)])
+    return now, out_packer, out, ext, pitch
 
+
+# ----------------------------------------------------------------------
+# The ladder
+#
+# Which lattice settles best is not predictable from the arrangement.  A
+# finer one has a thinner conservative skin and so more room to give, but
+# it is also a different lattice: the parts round onto it differently, and
+# the sweep converges somewhere else.  Measured over four arrangements of
+# the sample parts, the finest rung won twice, the middle two once each,
+# and the coarsest -- the pitch this pass used to run at alone -- never.
+#
+# So do not pick.  Run several rungs from the same arrangement, keep
+# whichever lands smallest, and let the cores decide how many to try: they
+# are independent, single-threaded, and none of them can return anything
+# worse than what it was handed.
+#
+# The tipped rungs are last because they cost about five times a plain one
+# and only sometimes pay -- on one arrangement they were the best result
+# by a full point of density, on another they moved 37 parts and changed
+# the box by nothing at all.
+LADDER = ((1.0, False), (4 / 3, False), (5 / 3, False), (2.0, False),
+          (4 / 3, True), (5 / 3, True))
+
+
+def _rungs(resolution, workers):
+    """The ladder, as far up it as there are cores to climb."""
+    n = max(1, min(int(workers), len(LADDER)))
+    return [(max(8, int(round(resolution * m))), shake)
+            for m, shake in LADDER[:n]]
+
+
+_SHARED = {}
+
+
+def _init_worker(shared):
+    _SHARED["v"] = shared
+
+
+def _worker(rung):
+    meshes, packer, packing, clearance, sweeps, deadline = _SHARED["v"]
+    resolution, shake = rung
+    try:
+        return _settle_once(meshes, packer, packing, resolution, clearance,
+                            sweeps, deadline, shake)
+    except Exception:
+        # One rung failing is not a reason to lose the others, and the
+        # arrangement handed in is still there to fall back on.
+        return None
+
+
+def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
+           budget=None, workers=1, say=None):
+    """Shake a finished arrangement down onto a finer lattice.
+
+    ``resolution`` is the first rung of the ladder in voxels across the
+    largest part; ``workers`` decides how many rungs above it are tried.
+
+    Returns ``(packer, packing, extents)`` for the settled arrangement, or
+    ``None`` if no rung could improve on the one it was given.
+    """
+    if len(packing.placements) < 2:
+        return None
+    if len(packing.placements) != len(packer.poses):
+        # A partial packing has no settled arrangement to speak of, and the
+        # fine pose lists would not line up with the part list.
+        return None
+
+    t0 = time.time()
+    objective = "height" if packer.objective in ("height", "fit") else "volume"
+    start = _measure(objective, packing.extents)
+    rungs = _rungs(resolution, workers)
+    # An absolute deadline, not a duration: the rungs run in processes that
+    # take a second or two to start, and a duration would hand each of them
+    # a fresh full budget from whenever it happened to get going.
+    deadline = None if budget is None else t0 + budget
+    shared = (meshes, packer, packing, clearance, sweeps, deadline)
+
+    if len(rungs) == 1:
+        results = [_settle_once(meshes, packer, packing, rungs[0][0], clearance,
+                                sweeps, deadline, rungs[0][1])]
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=len(rungs),
+                                 initializer=_init_worker,
+                                 initargs=(shared,)) as pool:
+            results = list(pool.map(_worker, rungs))
+
+    best = None
+    for got in results:
+        if got is not None and (best is None or got[0] < best[0]):
+            best = got
+    if best is None:
+        if say is not None:
+            say("  settle      no improvement (%d %s, %.1fs)"
+                % (len(rungs), "lattice" if len(rungs) == 1 else "lattices",
+                   time.time() - t0))
+        return None
+
+    now, out_packer, out, ext, pitch = best
     if say is not None:
         gain = 100 * (1 - now[0] / start[0]) if start[0] else 0.0
         what, shown = ("height" if objective == "height" else "vol"), now[0]
         if gain <= 1e-9 and start[1]:
             # The objective tied and volume broke the tie; report that.
-            what, shown, gain = "vol", vol, 100 * (1 - now[1] / start[1])
-        say("  settle      %s mm   %s %.4g   (-%.1f%%, pitch %.2f mm, %.1fs)"
+            what, shown, gain = "vol", now[1], 100 * (1 - now[1] / start[1])
+        say("  settle      %s mm   %s %.4g   (-%.1f%%, pitch %.2f mm of %d, %.1fs)"
             % (" x ".join("%7.1f" % v for v in ext), what, shown, gain,
-               pitch, time.time() - t0))
+               pitch, len(rungs), time.time() - t0))
     return out_packer, out, ext
