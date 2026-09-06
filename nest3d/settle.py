@@ -297,7 +297,7 @@ def _shake(pile, fine, offsets, part, window, objective, container, dilated,
 
 
 def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
-                 deadline, shake):
+                 deadline, shake, on_frame=None):
     """One settle, on one lattice.  The unit of work the ladder runs.
 
     Returns ``(measure, packer, packing, extents, pitch)`` for the settled
@@ -336,6 +336,8 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
 
     lo, hi = _bbox(fine, offsets)
     start = _measure(objective, hi - lo)
+    if on_frame is not None:
+        on_frame(fine, offsets, "transfer")
     if deadline is not None and time.time() > deadline:
         # Voxelising this rung alone ran the clock out; there is no time
         # left to sweep with, and an unswept transfer is never an
@@ -384,10 +386,15 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
     tips = list(SHAKE_DIRS) * SHAKE_CYCLES if shake else []
     tipped = 0
 
+    def note(label):
+        if on_frame is not None:
+            on_frame(fine, offsets, label)
+
     for _ in range(sweeps + len(tips)):
         if out_of_time():
             break
         if reseat_pass():
+            note("settle")
             continue
         # The objective sweep has run out of moves.  That does not mean the
         # arrangement is tight -- only that no part can shrink the box on
@@ -397,6 +404,7 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
             d = tips[tipped]
             tipped += 1
             if shake_pass(d):
+                note("tip")
                 break
         else:
             break
@@ -470,11 +478,17 @@ def _worker(rung):
 
 
 def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
-           budget=None, workers=1, say=None):
+           budget=None, workers=1, say=None, on_frame=None):
     """Shake a finished arrangement down onto a finer lattice.
 
     ``resolution`` is the first rung of the ladder in voxels across the
     largest part; ``workers`` decides how many rungs above it are tried.
+
+    ``on_frame(poses, offsets, label)`` is called after every pass that
+    moved something, for tracing.  It only applies to a single-rung run:
+    the rungs of a full ladder run in other processes, and shipping every
+    intermediate arrangement back through a pipe to throw all but one away
+    is not worth the wire.
 
     Returns ``(packer, packing, extents)`` for the settled arrangement, or
     ``None`` if no rung could improve on the one it was given.
@@ -498,7 +512,7 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
 
     if len(rungs) == 1:
         results = [_settle_once(meshes, packer, packing, rungs[0][0], clearance,
-                                sweeps, deadline, rungs[0][1])]
+                                sweeps, deadline, rungs[0][1], on_frame)]
     else:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=len(rungs),
