@@ -4,3 +4,9 @@ results/
 packed.step
 packed.stl
 packing.json
+viewer.html
+viewer_data.json
+viewer_multi.json
+viewer_walk.json
+results_glass/
+*.log

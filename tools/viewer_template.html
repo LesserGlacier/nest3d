@@ -1,0 +1,636 @@
+<title>Glass Positives Nesting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #EFEDE8;
+    --panel: #FFFFFF;
+    --panel-edge: #D9D5CC;
+    --ink: #171B21;
+    --muted: #5D6672;
+    --faint: #8B93A0;
+    --accent: #A9662A;
+    --measure: #2F7D75;
+    --grid: #CFCBC2;
+    --shadow: 0 1px 2px rgba(23,27,33,.08), 0 8px 24px rgba(23,27,33,.10);
+    --scrub: #DBD7CE;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #12161B;
+      --panel: #1A2028;
+      --panel-edge: #2A323C;
+      --ink: #E7E4DE;
+      --muted: #949CA8;
+      --faint: #6C7683;
+      --accent: #D2934C;
+      --measure: #5FB5AC;
+      --grid: #262E38;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+      --scrub: #2A323C;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #12161B;
+    --panel: #1A2028;
+    --panel-edge: #2A323C;
+    --ink: #E7E4DE;
+    --muted: #949CA8;
+    --faint: #6C7683;
+    --accent: #D2934C;
+    --measure: #5FB5AC;
+    --grid: #262E38;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+    --scrub: #2A323C;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    overflow: hidden;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  .label {
+    font-size: 10px; font-weight: 600; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--faint);
+  }
+
+  /* ---- instrument rail ---- */
+  #rail {
+    position: fixed; top: 16px; left: 16px; width: 268px;
+    max-height: calc(100vh - 132px);
+    display: flex; flex-direction: column; gap: 10px;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding-right: 2px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    border-radius: 6px; padding: 12px 13px; box-shadow: var(--shadow);
+  }
+  #title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 2px; }
+  #subtitle { color: var(--muted); font-size: 12px; margin: 0; }
+
+  .modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 10px; }
+  .modes button {
+    font: inherit; font-size: 11px; font-weight: 600;
+    padding: 7px 4px; cursor: pointer; color: var(--muted);
+    background: transparent; border: 1px solid var(--panel-edge);
+    border-radius: 4px; transition: color .12s, border-color .12s, background .12s;
+  }
+  .modes button:hover { color: var(--ink); }
+  .modes button[aria-pressed="true"] {
+    color: var(--ground); background: var(--accent); border-color: var(--accent);
+  }
+  #modehelp { color: var(--muted); font-size: 11.5px; margin: 9px 0 0; min-height: 2.6em; }
+
+  .readout { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: baseline; }
+  .readout dt { color: var(--faint); font-size: 10px; font-weight: 600;
+                letter-spacing: .08em; text-transform: uppercase; }
+  .readout dd { margin: 0; text-align: right; font-family: "IBM Plex Mono", monospace;
+                font-size: 13px; font-variant-numeric: tabular-nums; }
+  .big { font-size: 15px !important; font-weight: 500; color: var(--measure); }
+
+  /* density bar: the floor marker is the perfect-pack limit, real data */
+  #bar { position: relative; height: 6px; background: var(--scrub);
+         border-radius: 3px; margin-top: 10px; overflow: visible; }
+  #barfill { position: absolute; inset: 0 auto 0 0; background: var(--measure);
+             border-radius: 3px; transition: width .18s; }
+  #barfloor { position: absolute; top: -3px; bottom: -3px; width: 2px;
+              background: var(--accent); }
+  #barnote { color: var(--faint); font-size: 10.5px; margin-top: 5px; }
+
+  .parts { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
+  .part {
+    display: grid; grid-template-columns: 10px 1fr auto; gap: 9px;
+    align-items: center; padding: 4px 2px; cursor: pointer;
+    background: none; border: 0; font: inherit; color: var(--ink);
+    text-align: left; border-radius: 3px;
+  }
+  .part:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+  .part[aria-pressed="false"] { color: var(--faint); }
+  .part[aria-pressed="false"] .sw { opacity: .22; }
+  .sw { width: 10px; height: 10px; border-radius: 2px; }
+  .part .nm { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .part .vl { font-family: "IBM Plex Mono", monospace; font-size: 11px;
+              color: var(--faint); font-variant-numeric: tabular-nums; }
+
+  .toggles { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .toggles button {
+    font: inherit; font-size: 11px; padding: 5px 9px; cursor: pointer;
+    color: var(--muted); background: transparent;
+    border: 1px solid var(--panel-edge); border-radius: 4px;
+  }
+  .toggles button[aria-pressed="true"] { color: var(--ink); border-color: var(--measure); }
+
+  /* ---- transport ---- */
+  #transport {
+    position: fixed; left: 16px; right: 16px; bottom: 16px;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    border-radius: 6px; box-shadow: var(--shadow);
+    padding: 10px 14px; display: flex; align-items: center; gap: 14px;
+  }
+  #play {
+    font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    width: 76px; padding: 7px 0; color: var(--ground); background: var(--ink);
+    border: 0; border-radius: 4px; flex: none;
+  }
+  #track { position: relative; flex: 1; height: 26px; cursor: pointer; }
+  #trackline { position: absolute; left: 0; right: 0; top: 12px; height: 2px;
+               background: var(--scrub); border-radius: 1px; }
+  #trackfill { position: absolute; left: 0; top: 12px; height: 2px;
+               background: var(--accent); border-radius: 1px; }
+  #ticks { position: absolute; left: 0; right: 0; top: 6px; height: 14px; }
+  #ticks i { position: absolute; top: 0; width: 1px; height: 6px;
+             background: var(--measure); opacity: .8; }
+  #knob { position: absolute; top: 7px; width: 12px; height: 12px; margin-left: -6px;
+          border-radius: 50%; background: var(--accent);
+          border: 2px solid var(--panel); }
+  #counter { font-family: "IBM Plex Mono", monospace; font-size: 12px;
+             color: var(--muted); font-variant-numeric: tabular-nums;
+             white-space: nowrap; flex: none; min-width: 190px; text-align: right; }
+  .phase { display: inline-block; padding: 1px 6px; border-radius: 3px;
+           font-size: 10px; font-weight: 600; letter-spacing: .05em;
+           text-transform: uppercase; border: 1px solid var(--panel-edge);
+           color: var(--muted); }
+  .phase[data-p="squeeze"] { color: var(--measure); border-color: var(--measure); }
+  .phase[data-p="winner"] { color: var(--ground); background: var(--accent);
+                            border-color: var(--accent); }
+
+  #hint { position: fixed; right: 16px; top: 16px; text-align: right;
+          color: var(--faint); font-size: 11px; line-height: 1.6;
+          pointer-events: none; }
+
+  @media (max-width: 820px) {
+    #rail { position: fixed; inset: auto 16px 84px 16px; width: auto;
+            max-height: 42vh; }
+    #hint { display: none; }
+    #counter { min-width: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+
+<div id="stage"></div>
+
+<div id="rail">
+  <div class="card">
+    <h1 id="title">Nesting nine glass positives</h1>
+    <p id="subtitle">Every frame is a complete, verified, non-overlapping arrangement.</p>
+    <div class="modes" role="group" aria-label="Track">
+      <button id="m-best" aria-pressed="true">Ladder</button>
+      <button id="m-search" aria-pressed="false">Walk</button>
+      <button id="m-build" aria-pressed="false">Build</button>
+    </div>
+    <p id="modehelp"></p>
+  </div>
+
+  <div class="card">
+    <dl class="readout">
+      <dt>Box</dt><dd id="r-box" class="big">&mdash;</dd>
+      <dt>Volume</dt><dd id="r-vol">&mdash;</dd>
+      <dt>Glass</dt><dd id="r-glass">&mdash;</dd>
+      <dt>Density</dt><dd id="r-den">&mdash;</dd>
+    </dl>
+    <div id="bar"><div id="barfill"></div><div id="barfloor"></div></div>
+    <p id="barnote"></p>
+  </div>
+
+  <div class="card">
+    <span class="label">Parts</span>
+    <div class="parts" id="parts"></div>
+    <div class="toggles">
+      <button id="t-xray" aria-pressed="false">X-ray</button>
+      <button id="t-box" aria-pressed="true">Box</button>
+      <button id="t-grid" aria-pressed="true">Floor</button>
+    </div>
+  </div>
+</div>
+
+<div id="hint">
+  drag to orbit &middot; wheel to zoom<br>shift-drag to pan &middot; space to play
+</div>
+
+<div id="transport">
+  <button id="play">Play</button>
+  <div id="track">
+    <div id="trackline"></div><div id="trackfill"></div>
+    <div id="ticks"></div><div id="knob"></div>
+  </div>
+  <div id="counter">&mdash;</div>
+</div>
+
+<script id="payload" type="application/json">__DATA__</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("payload").textContent);
+  var N = DATA.parts.length;
+
+  var COLORS = ["#7FA9C4","#C98A45","#86A87C","#B77B8C","#D0A94B",
+                "#6E93A8","#A88BB5","#C4735A","#7FB3A8"];
+
+  var HELP = {
+    best: "Every improvement found across all 20 parallel chains, ordered worst to best. Ends on the arrangement actually chosen. Ordered by quality, not by time.",
+    search: "One chain's real walk through the search, in time order. It accepts worse boxes on purpose so it can climb out of a local optimum — watch it settle, jump, and re-settle.",
+    build: "The winning arrangement assembled in placement order. Watch which part forces the box open."
+  };
+
+  // ---- scene -------------------------------------------------------
+  var stage = document.getElementById("stage");
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(38, 1, 1, 40000);
+  camera.up.set(0, 0, 1);                       // CAD convention: Z is up
+  var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  stage.appendChild(renderer.domElement);
+
+  function css(v) {
+    return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  }
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x404650, 0.85));
+  var key = new THREE.DirectionalLight(0xffffff, 0.75);
+  key.position.set(0.6, -1, 1.1); scene.add(key);
+  var fill = new THREE.DirectionalLight(0xffffff, 0.3);
+  fill.position.set(-1, 0.7, 0.4); scene.add(fill);
+
+  var group = new THREE.Group(); scene.add(group);
+
+  var meshes = [], localVerts = [];
+  DATA.parts.forEach(function (p, i) {
+    var g = new THREE.BufferGeometry();
+    var pos = new Float32Array(p.geometry.positions);
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    g.setIndex(p.geometry.indices);
+    g.computeVertexNormals();
+    var mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(COLORS[i % COLORS.length]),
+      roughness: 0.62, metalness: 0.04, flatShading: false
+    });
+    var m = new THREE.Mesh(g, mat);
+    m.matrixAutoUpdate = false;
+    group.add(m); meshes.push(m); localVerts.push(pos);
+  });
+
+  // Bounding box: unit cube scaled per frame, so one object serves every frame.
+  var boxEdges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+    new THREE.LineBasicMaterial({ color: 0x5FB5AC })
+  );
+  scene.add(boxEdges);
+
+  // GridHelper bakes its colours into vertex attributes, so a mid grey at
+  // low opacity is used instead of a themed colour -- it reads correctly on
+  // either ground without rebuilding the object on a theme change.
+  var grid = new THREE.GridHelper(1000, 20, 0x808A96, 0x808A96);
+  grid.rotation.x = Math.PI / 2;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.2;
+  scene.add(grid);
+
+  function themeColors() {
+    boxEdges.material.color.set(css("--measure") || "#5FB5AC");
+    renderer.setClearColor(0x000000, 0);
+  }
+  themeColors();
+
+  // ---- camera control (Z-up spherical) ------------------------------
+  var target = new THREE.Vector3(0, 0, 0);
+  var radius = 900, theta = -0.9, phi = 1.12, autoR = 900;
+
+  function place() {
+    var sp = Math.sin(phi);
+    camera.position.set(
+      target.x + radius * sp * Math.cos(theta),
+      target.y + radius * sp * Math.sin(theta),
+      target.z + radius * Math.cos(phi)
+    );
+    camera.lookAt(target);
+  }
+
+  var dragging = null, lastX = 0, lastY = 0;
+  renderer.domElement.addEventListener("pointerdown", function (e) {
+    dragging = (e.shiftKey || e.button === 2) ? "pan" : "orbit";
+    lastX = e.clientX; lastY = e.clientY;
+    renderer.domElement.setPointerCapture(e.pointerId);
+  });
+  renderer.domElement.addEventListener("pointermove", function (e) {
+    if (!dragging) return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    if (dragging === "orbit") {
+      theta -= dx * 0.008;
+      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.008));
+    } else {
+      var right = new THREE.Vector3().subVectors(camera.position, target)
+        .cross(camera.up).normalize();
+      var up = new THREE.Vector3().crossVectors(right,
+        new THREE.Vector3().subVectors(camera.position, target)).normalize();
+      var k = radius * 0.0016;
+      target.addScaledVector(right, -dx * k);
+      target.addScaledVector(up, -dy * k);
+    }
+    place();
+  });
+  function endDrag(e) {
+    dragging = null;
+    try { renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+  renderer.domElement.addEventListener("pointerup", endDrag);
+  renderer.domElement.addEventListener("pointercancel", endDrag);
+  renderer.domElement.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  renderer.domElement.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    radius = Math.max(autoR * 0.15, Math.min(autoR * 4,
+      radius * (1 + Math.sign(e.deltaY) * 0.12)));
+    place();
+  }, { passive: false });
+
+  function resize() {
+    var w = stage.clientWidth, h = stage.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+  }
+  window.addEventListener("resize", resize);
+
+  // ---- frame application -------------------------------------------
+  var mode = "best";
+  var visible = DATA.parts.map(function () { return true; });
+  var showBox = true, xray = false;
+  var idx = 0, playing = false, lastTick = 0;
+
+  var tracks = {
+    best: DATA.tracks.best,
+    search: DATA.tracks.search,
+    build: DATA.tracks.best.length
+      ? DATA.tracks.best[DATA.tracks.best.length - 1] : null
+  };
+  var buildFrame = tracks.build;
+  var buildAABBs = [];
+
+  function frameCount() {
+    if (mode === "build") return buildFrame ? buildFrame.order.length : 0;
+    return tracks[mode].length;
+  }
+
+  var tmp = new THREE.Matrix4();
+  function setMatrices(fr) {
+    for (var i = 0; i < N; i++) {
+      var m = fr.m[i];
+      if (!m) { meshes[i].visible = false; continue; }
+      meshes[i].matrix.set(m[0], m[1], m[2], m[3],
+                           m[4], m[5], m[6], m[7],
+                           m[8], m[9], m[10], m[11],
+                           0, 0, 0, 1);
+    }
+  }
+
+  // Exact world AABB of a subset, from the real vertices.  Transforming a
+  // local AABB's corners would give a box that is too big, and the whole
+  // point of this page is the box being the right size.
+  function aabbOf(fr, partIdxs) {
+    var lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    partIdxs.forEach(function (i) {
+      var m = fr.m[i]; if (!m) return;
+      var v = localVerts[i];
+      for (var k = 0; k < v.length; k += 3) {
+        var x = v[k], y = v[k + 1], z = v[k + 2];
+        var wx = m[0] * x + m[1] * y + m[2] * z + m[3];
+        var wy = m[4] * x + m[5] * y + m[6] * z + m[7];
+        var wz = m[8] * x + m[9] * y + m[10] * z + m[11];
+        if (wx < lo[0]) lo[0] = wx; if (wx > hi[0]) hi[0] = wx;
+        if (wy < lo[1]) lo[1] = wy; if (wy > hi[1]) hi[1] = wy;
+        if (wz < lo[2]) lo[2] = wz; if (wz > hi[2]) hi[2] = wz;
+      }
+    });
+    return { lo: lo, ext: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] };
+  }
+
+  function precomputeBuild() {
+    buildAABBs = [];
+    if (!buildFrame) return;
+    for (var k = 1; k <= buildFrame.order.length; k++) {
+      buildAABBs.push(aabbOf(buildFrame, buildFrame.order.slice(0, k)));
+    }
+  }
+
+  var fmt1 = function (v) { return v.toFixed(1); };
+
+  function render(i) {
+    var fr, lo, ext, revealed = null;
+    if (mode === "build") {
+      if (!buildFrame) return;
+      fr = buildFrame;
+      revealed = buildFrame.order.slice(0, i + 1);
+      var bb = buildAABBs[i];
+      lo = bb.lo; ext = bb.ext;
+    } else {
+      fr = tracks[mode][i];
+      if (!fr) return;
+      lo = fr.lo; ext = fr.ext;
+    }
+    setMatrices(fr);
+
+    for (var p = 0; p < N; p++) {
+      var on = visible[p] && fr.m[p] !== null &&
+               (revealed === null || revealed.indexOf(p) !== -1);
+      meshes[p].visible = on;
+      meshes[p].material.transparent = xray;
+      meshes[p].material.opacity = xray ? 0.42 : 1;
+      meshes[p].material.depthWrite = !xray;
+    }
+
+    // Centre the frame's box on the origin so the box stays put and the
+    // parts move inside it, rather than the whole pile drifting.
+    var cx = lo[0] + ext[0] / 2, cy = lo[1] + ext[1] / 2, cz = lo[2] + ext[2] / 2;
+    group.position.set(-cx, -cy, -cz);
+    boxEdges.scale.set(ext[0], ext[1], ext[2]);
+    boxEdges.visible = showBox;
+    grid.position.set(0, 0, -ext[2] / 2);
+    grid.scale.setScalar(Math.max(ext[0], ext[1]) / 700);
+
+    var vol = ext[0] * ext[1] * ext[2];
+    var den = DATA.part_volume / vol;
+    document.getElementById("r-box").textContent =
+      fmt1(ext[0]) + " × " + fmt1(ext[1]) + " × " + fmt1(ext[2]);
+    document.getElementById("r-vol").textContent =
+      (vol / 1e6).toFixed(2) + " L";
+    document.getElementById("r-glass").textContent =
+      (DATA.part_volume / 1e6).toFixed(2) + " L";
+    document.getElementById("r-den").textContent = (100 * den).toFixed(1) + "%";
+    document.getElementById("barfill").style.width =
+      Math.max(0, Math.min(100, 100 * den)) + "%";
+
+    var total = frameCount();
+    var phase = (mode === "build") ? "place" : fr.phase;
+    var lbl;
+    if (mode === "build") {
+      lbl = "part " + (i + 1) + " / " + total + " · " +
+            DATA.parts[buildFrame.order[i]].name;
+    } else {
+      lbl = "frame " + (i + 1) + " / " + total + " · " + fr.t.toFixed(0) + "s";
+    }
+    document.getElementById("counter").innerHTML =
+      '<span class="phase" data-p="' + phase + '">' + phase + "</span> &nbsp;" + lbl;
+
+    var pct = total > 1 ? i / (total - 1) : 0;
+    document.getElementById("trackfill").style.width = (pct * 100) + "%";
+    document.getElementById("knob").style.left = (pct * 100) + "%";
+  }
+
+  function fitCamera() {
+    var ref = (mode === "build" && buildAABBs.length)
+      ? buildAABBs[buildAABBs.length - 1]
+      : (tracks.best.length ? { ext: tracks.best[0].ext } : { ext: [400, 400, 400] });
+    var d = Math.sqrt(ref.ext[0] * ref.ext[0] + ref.ext[1] * ref.ext[1] +
+                      ref.ext[2] * ref.ext[2]);
+    autoR = d * 1.75; radius = autoR; place();
+  }
+
+  // ---- ticks: where the best actually improved ----------------------
+  function buildTicks() {
+    var host = document.getElementById("ticks");
+    host.innerHTML = "";
+    if (mode === "build") return;
+    var arr = tracks[mode], total = arr.length;
+    if (total < 2) return;
+    arr.forEach(function (fr, i) {
+      if (!fr.best) return;
+      var t = document.createElement("i");
+      t.style.left = (100 * i / (total - 1)) + "%";
+      host.appendChild(t);
+    });
+  }
+
+  // ---- UI ------------------------------------------------------------
+  function setMode(next) {
+    mode = next;
+    ["best", "search", "build"].forEach(function (k) {
+      document.getElementById("m-" + k)
+        .setAttribute("aria-pressed", String(k === next));
+    });
+    document.getElementById("modehelp").textContent = HELP[next];
+    idx = 0; buildTicks(); fitCamera(); render(idx);
+  }
+  ["best", "search", "build"].forEach(function (k) {
+    document.getElementById("m-" + k).addEventListener("click", function () {
+      setMode(k);
+    });
+  });
+
+  var partsHost = document.getElementById("parts");
+  DATA.parts.forEach(function (p, i) {
+    var b = document.createElement("button");
+    b.className = "part"; b.setAttribute("aria-pressed", "true");
+    b.innerHTML = '<span class="sw" style="background:' +
+      COLORS[i % COLORS.length] + '"></span><span class="nm"></span>' +
+      '<span class="vl">' + (p.volume / 1e6).toFixed(2) + " L</span>";
+    b.querySelector(".nm").textContent = p.name;
+    b.addEventListener("click", function () {
+      visible[i] = !visible[i];
+      b.setAttribute("aria-pressed", String(visible[i]));
+      render(idx);
+    });
+    partsHost.appendChild(b);
+  });
+
+  function toggle(id, get, set) {
+    var el = document.getElementById(id);
+    el.addEventListener("click", function () {
+      set(!get());
+      el.setAttribute("aria-pressed", String(get()));
+      render(idx);
+    });
+  }
+  toggle("t-xray", function () { return xray; }, function (v) { xray = v; });
+  toggle("t-box", function () { return showBox; }, function (v) { showBox = v; });
+  toggle("t-grid", function () { return grid.visible; },
+         function (v) { grid.visible = v; });
+
+  var playBtn = document.getElementById("play");
+  function setPlaying(v) {
+    playing = v; playBtn.textContent = v ? "Pause" : "Play";
+  }
+  playBtn.addEventListener("click", function () {
+    if (!playing && idx >= frameCount() - 1) idx = 0;
+    setPlaying(!playing);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "Space") { e.preventDefault(); playBtn.click(); }
+    if (e.code === "ArrowRight") { setPlaying(false); idx = Math.min(frameCount() - 1, idx + 1); render(idx); }
+    if (e.code === "ArrowLeft") { setPlaying(false); idx = Math.max(0, idx - 1); render(idx); }
+  });
+
+  var track = document.getElementById("track");
+  function scrubTo(clientX) {
+    var r = track.getBoundingClientRect();
+    var f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    idx = Math.round(f * (frameCount() - 1));
+    render(idx);
+  }
+  var scrubbing = false;
+  track.addEventListener("pointerdown", function (e) {
+    scrubbing = true; setPlaying(false); scrubTo(e.clientX);
+    track.setPointerCapture(e.pointerId);
+  });
+  track.addEventListener("pointermove", function (e) {
+    if (scrubbing) scrubTo(e.clientX);
+  });
+  track.addEventListener("pointerup", function (e) {
+    scrubbing = false;
+    try { track.releasePointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  // ---- go -------------------------------------------------------------
+  document.getElementById("barfloor").style.left = "100%";
+  document.getElementById("barnote").textContent =
+    "Marker at 100% is the theoretical limit — no air at all. " +
+    (DATA.stats.chains
+      ? DATA.stats.chains + " parallel chains searched to get here."
+      : DATA.stats.evaluated.toLocaleString() +
+        " arrangements were built and scored to get here.");
+
+  if (!tracks.search || !tracks.search.length) {
+    var wb = document.getElementById("m-search");
+    wb.disabled = true; wb.style.opacity = ".45"; wb.style.cursor = "default";
+  }
+  precomputeBuild();
+  resize();
+  setMode("best");
+
+  var speed = { best: 700, search: 110, build: 520 };
+  function loop(now) {
+    requestAnimationFrame(loop);
+    if (playing) {
+      if (!lastTick) lastTick = now;
+      if (now - lastTick > speed[mode]) {
+        lastTick = now;
+        if (idx >= frameCount() - 1) { setPlaying(false); }
+        else { idx++; render(idx); }
+      }
+    } else { lastTick = 0; }
+    renderer.render(scene, camera);
+  }
+  requestAnimationFrame(loop);
+
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", themeColors);
+  }
+})();
+</script>

@@ -51,12 +51,13 @@ def seed_orders(poses_per_part, rng, n):
 
 
 class Search:
-    def __init__(self, packer, seed=0, cache=True):
+    def __init__(self, packer, seed=0, cache=True, recorder=None):
         self.packer = packer
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
         self.cache = {} if cache else None
         self.evaluations = 0
+        self.recorder = recorder
 
     def evaluate(self, order, pose_choice):
         key = (order, pose_choice)
@@ -114,6 +115,8 @@ class Search:
         """
         cur = self.evaluate(order, pose_choice)
         best = cur
+        if self.recorder is not None:
+            self.recorder.record(cur.packing, accepted=True, is_best=True)
 
         for it in range(iterations):
             if deadline is not None and time.time() > deadline:
@@ -125,10 +128,16 @@ class Search:
 
             if math.isfinite(cand.score):
                 delta = (cand.score - cur.score) / max(abs(cur.score), 1e-12)
-                if delta <= 0 or self.rng.random() < math.exp(-delta / temp):
+                accepted = (delta <= 0
+                            or self.rng.random() < math.exp(-delta / temp))
+                if accepted:
                     cur = cand
-                if cand.score < best.score:
+                improved = cand.score < best.score
+                if improved:
                     best = cand
+                if self.recorder is not None:
+                    self.recorder.record(cand.packing, accepted=accepted,
+                                         is_best=improved)
             if callback is not None:
                 callback(it, iterations, best.score, cur.score)
         return best

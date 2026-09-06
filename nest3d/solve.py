@@ -28,6 +28,7 @@ import numpy as np
 
 from .pack import Packer
 from .search import Search
+from .trace import Recorder
 
 
 @dataclass
@@ -42,6 +43,8 @@ class Result:
     container: object = None
     config: object = None
     objective: str = "volume"
+    traces: list = field(default_factory=list)
+    winner_packing: object = None
 
     @property
     def efficiency(self) -> float:
@@ -101,7 +104,7 @@ class _AspectJob:
     deadline: float
 
 
-def _search_aspect(poses, job):
+def _search_aspect(poses, job, recorder=None):
     """Shrink one aspect ratio as far as it will go.  Runs in a worker.
 
     Descend first, bisect second.  Bisecting straight away between the
@@ -136,7 +139,7 @@ def _search_aspect(poses, job):
         # The inner anneal needs the deadline too: checking only between
         # steps lets a single step overrun by a whole annealing run, which
         # is what made --time advisory rather than binding.
-        sol = Search(packer, seed=job.seed + step).run(
+        sol = Search(packer, seed=job.seed + step, recorder=recorder).run(
             starts=job.starts, iterations=job.iterations, warm=warm,
             deadline=job_end)
 
@@ -180,9 +183,11 @@ def _worker(job):
         return None
 
 
-def _run_jobs(poses, jobs, workers):
+def _run_jobs(poses, jobs, workers, recorder=None):
     if workers <= 1 or len(jobs) == 1:
-        return [_search_aspect(poses, j) for j in jobs]
+        # Only the serial path can record: a worker process would have to
+        # ship its whole trace back through the pool.
+        return [_search_aspect(poses, j, recorder) for j in jobs]
     from concurrent.futures import ProcessPoolExecutor
     n = min(workers, len(jobs))
     with ProcessPoolExecutor(max_workers=n, initializer=_init_worker,
@@ -200,7 +205,8 @@ def _orient_aspect(aspect, box):
 
 class Solver:
     def __init__(self, poses_per_part, meshes=None, seed=0, verbose=True,
-                 contact_weight=0.0):
+                 contact_weight=0.0, recorder=None):
+        self.recorder = recorder
         self.poses = poses_per_part
         self.meshes = meshes
         self.seed = seed
@@ -219,7 +225,9 @@ class Solver:
                    budget=None):
         packer = Packer(self.poses, objective=objective,
                         contact_weight=self.contact_weight)
-        search = Search(packer, seed=self.seed)
+        search = Search(packer, seed=self.seed, recorder=self.recorder)
+        if self.recorder is not None:
+            self.recorder.phase = "free"
         deadline = None if budget is None else time.time() + budget
         best = search.run(starts=starts, iterations=iterations,
                           deadline=deadline)
@@ -280,7 +288,9 @@ class Solver:
                 for ai, aspect in enumerate(aspects)
             ]
 
-            outcomes = _run_jobs(self.poses, jobs, workers)
+            if self.recorder is not None:
+                self.recorder.phase = "squeeze"
+            outcomes = _run_jobs(self.poses, jobs, workers, self.recorder)
             improved = False
             for out in outcomes:
                 if out is None:
@@ -354,9 +364,13 @@ def _fmt(ext):
 
 def _chain(poses, part_vol, seed, budget, contact_weight, free_starts,
            free_iterations, squeeze_starts, squeeze_iterations, rounds,
-           free_budget=None):
+           free_budget=None, record=False):
+    # A chain's *improvements* are only a handful of frames, and a frame is
+    # a few dozen bytes, so they travel back from a worker cheaply.  It is
+    # the full evaluation trace that would be too much to ship.
+    rec = Recorder(max_frames=8000) if record else None
     solver = Solver(poses, meshes=None, seed=seed, verbose=False,
-                    contact_weight=contact_weight)
+                    contact_weight=contact_weight, recorder=rec)
     solver.part_volume = part_vol
     res = solver.solve(free_starts=free_starts,
                        free_iterations=free_iterations,
@@ -365,7 +379,8 @@ def _chain(poses, part_vol, seed, budget, contact_weight, free_starts,
                        squeeze_iterations=squeeze_iterations,
                        workers=1, rounds=rounds, free_budget=free_budget)
     container = None if res.container is None else [float(v) for v in res.container]
-    return float(res.volume), res.config, container, res.objective
+    frames = rec.best_frames() if rec is not None else []
+    return float(res.volume), res.config, container, res.objective, frames
 
 
 def _chain_worker(args):
@@ -379,7 +394,7 @@ def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
                      chains=None, contact_weight=0.0, free_starts=3,
                      free_iterations=120, squeeze_starts=2,
                      squeeze_iterations=60, rounds=2, say=None,
-                     free_budget=None):
+                     free_budget=None, record=False):
     """Run several independent solve chains and keep the best.
 
     Each chain is a complete free-then-squeeze solve from its own random
@@ -392,7 +407,7 @@ def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
     chains = chains or max(workers, 1)
     args = [(pv, seed + 977 * k, budget, contact_weight, free_starts,
              free_iterations, squeeze_starts, squeeze_iterations, rounds,
-             free_budget)
+             free_budget, record)
             for k in range(chains)]
 
     def note(k, total, out):
@@ -443,7 +458,7 @@ def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
     # a worker reported would trust a replay that never happened.
     best = None
     replayed = []
-    for _vol, config, container, objective in outs:
+    for _vol, config, container, objective, _frames in outs:
         packer = Packer(poses, objective=objective, container=container,
                         contact_weight=contact_weight)
         sol = Search(packer, seed=seed).evaluate(tuple(config[0]),
@@ -465,6 +480,12 @@ def solve_multistart(poses, meshes=None, seed=0, budget=60.0, workers=1,
             % (len(vols), vols[0], vols[len(vols) // 2], vols[-1]))
 
     vol, ext, sol, packer, container, objective, config = best
-    return Result(extents=ext, volume=vol, density=pv / vol,
-                  packing=sol.packing, packer=packer, lower_bound=pv,
-                  container=container, objective=objective, config=config)
+    result = Result(extents=ext, volume=vol, density=pv / vol,
+                    packing=sol.packing, packer=packer, lower_bound=pv,
+                    container=container, objective=objective, config=config)
+    # Hand back every chain's improvement trace plus the winning packing,
+    # so a viewer can show the search *and* end on the answer that was
+    # actually chosen.
+    result.traces = [o[4] for o in outs if o is not None]
+    result.winner_packing = sol.packing
+    return result
