@@ -32,7 +32,7 @@ def main():
     blob = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     html = html.replace("__DATA__", blob)
     if args.title:
-        html = html.replace("<title>Glass Positives Nesting</title>",
+        html = html.replace("<title>Nesting Replay</title>",
                             "<title>%s</title>" % args.title)
 
     Path(args.out).write_text(html, encoding="utf-8")

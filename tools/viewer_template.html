@@ -1,4 +1,4 @@
-<title>Glass Positives Nesting</title>
+<title>Nesting Replay</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -188,7 +188,7 @@
 
 <div id="rail">
   <div class="card">
-    <h1 id="title">Nesting nine glass positives</h1>
+    <h1 id="title">Nesting replay</h1>
     <p id="subtitle">Every frame is a complete, verified, non-overlapping arrangement.</p>
     <div class="modes" role="group" aria-label="Track">
       <button id="m-best" aria-pressed="true">Ladder</button>
@@ -244,6 +244,8 @@
   var COLORS = ["#7FA9C4","#C98A45","#86A87C","#B77B8C","#D0A94B",
                 "#6E93A8","#A88BB5","#C4735A","#7FB3A8"];
 
+  document.getElementById("title").textContent =
+    "Nesting " + N + " parts";
   var HELP = {
     best: "Every improvement found across all 20 parallel chains, ordered worst to best. Ends on the arrangement actually chosen. Ordered by quality, not by time.",
     search: "One chain's real walk through the search, in time order. It accepts worse boxes on purpose so it can climb out of a local optimum — watch it settle, jump, and re-settle.",
