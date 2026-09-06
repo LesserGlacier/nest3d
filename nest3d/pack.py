@@ -192,8 +192,8 @@ class Packer:
                     # annealer needs a gradient to climb out of an
                     # over-tight container, and "eight of nine placed" is a
                     # far more useful signal than a bare failure.
-                    return self._finalise(placed, unplaced=len(order) - step,
-                                          failed=part_i)
+                    return self.finalise(placed, unplaced=len(order) - step,
+                                         failed=part_i)
                 cur_lo = np.minimum(cur_lo, off + pose.pad)
                 cur_hi = np.maximum(cur_hi, off + pose.pad + ext_v)
 
@@ -201,7 +201,7 @@ class Packer:
                  off[2]:off[2] + s[2]] |= pose.mask
             placed.append(Placement(part_i, pose_choice[part_i], off))
 
-        return self._finalise(placed)
+        return self.finalise(placed)
 
     # ------------------------------------------------------------------
     def _best_offset(self, pile, pose, cur_lo, cur_hi, lattice, placed):
@@ -297,8 +297,13 @@ class Packer:
         return cand[np.argsort(scores, kind="stable")]
 
     # ------------------------------------------------------------------
-    def _finalise(self, placed, unplaced=0, failed=None):
-        """Measure the result from exact mesh AABBs, not from voxels."""
+    def finalise(self, placed, unplaced=0, failed=None):
+        """Package placements as a Packing, measured from exact mesh AABBs.
+
+        Public because the settle builds its arrangement by moving parts
+        rather than by placing them, and still has to be measured and
+        scored the same way.
+        """
         lo = np.full(3, np.inf)
         hi = np.full(3, -np.inf)
         for p in placed:

@@ -71,6 +71,13 @@ def build_parser():
                    help="override the number of sampled SO(3) orientations")
     p.add_argument("--no-refine", action="store_true",
                    help="skip the fine-pitch pass")
+    p.add_argument("--no-settle", action="store_true",
+                   help="skip the final settle, which shakes the finished "
+                        "arrangement down onto a much finer lattice")
+    p.add_argument("--settle-resolution", type=int, default=96,
+                   help="voxels across the largest part for the settle "
+                        "(default 96). Costs seconds, not minutes, because "
+                        "nothing is searched -- each part just re-seats.")
     p.add_argument("--contact", dest="contact_weight", type=float, default=0.0,
                    help="tie-break weight favouring snug placements "
                         "(0 disables, 1 is a good value to try)")
@@ -151,6 +158,8 @@ def main(argv=None):
              seed=args.seed,
              split_solids=args.split_solids,
              refine=not args.no_refine,
+             settle=not args.no_settle,
+             settle_resolution=args.settle_resolution,
              contact_weight=args.contact_weight,
              workers=args.workers,
              verbose=not args.quiet,

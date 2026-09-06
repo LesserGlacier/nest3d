@@ -1,12 +1,17 @@
 """End-to-end pipeline: files in, packed arrangement out.
 
-Runs at two resolutions.  The coarse pass does the real searching, because
-that is where thousands of candidate arrangements are affordable; the fine
-pass re-voxelises only the orientations that survived and tightens the
-answer, because that is where the last few per cent of box live.
+Search coarse, refine fine, then settle.  The coarse pass does the real
+searching, because that is where thousands of candidate arrangements are
+affordable; the fine pass re-voxelises only the orientations that survived
+and tightens the answer.  Orientation indices are kept stable between the
+two, so a solution found coarse can be handed straight to the fine pass as
+a starting point.
 
-Orientation indices are kept stable between the two passes, so a solution
-found coarse can be handed straight to the fine pass as a starting point.
+The settle is different in kind.  It searches nothing at all: it takes the
+arrangement as found and lets each part slide to the best position within
+a voxel or two of where it stands, on a lattice several times finer than
+either search pass could afford.  That is what takes back the slack the
+search's own pitch left at every contact -- see settle.py.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from .geometry import load_parts
 from .orient import candidate_rotations
 from .pack import Packer, verify_packing
 from .search import Search
+from .settle import settle as settle_arrangement
 from .solve import Solver, part_volume, solve_multistart
 from .voxel import build_poses, suggest_pitch
 
@@ -68,9 +74,9 @@ def build_orientations(parts, preset="rest", n_random=None, seed=0, log=None):
 def run(paths, objective="volume", resolution=28, refine_resolution=48,
         pitch=None, clearance=0.0, orientations="rest", n_random=None,
         container=None, time_budget=120.0, seed=0, split_solids=False,
-        refine=True, contact_weight=0.0, workers=1, verbose=True,
-        on_phase=None):
-    """Load, orient, pack and refine.  Returns a PipelineResult."""
+        refine=True, settle=True, settle_resolution=96, contact_weight=0.0,
+        workers=1, verbose=True, on_phase=None):
+    """Load, orient, pack, refine and settle.  Returns a PipelineResult."""
     log = []
 
     def say(msg):
@@ -105,8 +111,17 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
            timings["voxelize"]))
 
     # Budget split: the coarse pass earns most of it, since it is where
-    # arrangements are cheap enough to explore properly.
-    coarse_budget = time_budget * (0.65 if refine else 1.0)
+    # arrangements are cheap enough to explore properly.  The settle is
+    # given a small slice of its own because it buys more per second than
+    # either search pass does -- but it is also usually done long before it
+    # spends the slice.
+    # A fixed container is answered at one pitch, so there is no refinement
+    # to reserve for -- and reserving it anyway is how a --container run
+    # came to spend only two thirds of the budget it was given.
+    refine = refine and container is None
+    settle_share = 0.10 if settle else 0.0
+    refine_share = (0.35 - settle_share / 2) if refine else 0.0
+    coarse_budget = time_budget * (1.0 - refine_share - settle_share)
 
     t0 = time.time()
     if container is not None:
@@ -135,7 +150,7 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
     final_poses = poses
     final_pitch = coarse_pitch
 
-    if refine and container is None:
+    if refine:
         t0 = time.time()
         fine_pitch = pitch / 1.7 if pitch else suggest_pitch(meshes, refine_resolution)
         fine_clearance = (int(np.ceil(clearance / (2 * fine_pitch)))
@@ -144,7 +159,8 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
                                   clearance_voxels=fine_clearance)
                       for p, r in zip(parts, kept_rotations)]
         refined = _refine(fine_poses, meshes, result, seed,
-                          time_budget * 0.35, contact_weight, workers, say)
+                          time_budget * refine_share, contact_weight,
+                          workers, say)
         timings["refine"] = time.time() - t0
         if refined is not None and refined.volume < result.volume:
             result = refined
@@ -154,6 +170,25 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
                 on_phase("refine", _assemble(parts, result, fine_pitch))
         else:
             say("  refine      no improvement, keeping the coarse result")
+
+    if settle:
+        # Shake the box down.  The search leaves every contact loose by up
+        # to a voxel of its own pitch, and no move in its search space can
+        # take that back -- but a local re-seat on a finer lattice can, in
+        # seconds rather than minutes.
+        t0 = time.time()
+        settled = settle_arrangement(
+            meshes, result.packer, result.packing,
+            resolution=settle_resolution, clearance=clearance,
+            budget=max(5.0, time_budget * settle_share), say=say)
+        timings["settle"] = time.time() - t0
+        if settled is not None:
+            s_packer, s_packing, s_ext = settled
+            result = _settled_result(result, s_packer, s_packing, s_ext)
+            final_poses = s_packer.poses
+            final_pitch = s_packer.pitch
+            if on_phase is not None:
+                on_phase("settle", _assemble(parts, result, final_pitch))
 
     transforms = [None] * len(parts)
     for pl in result.packing.placements:
@@ -165,6 +200,28 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
     return PipelineResult(parts=parts, result=result, poses=final_poses,
                           pitch=final_pitch, transforms=transforms,
                           overlaps=overlaps, timings=timings, log=log)
+
+
+def _settled_result(previous, packer, packing, extents):
+    """The same Result, re-pointed at the settled arrangement.
+
+    ``config`` is dropped deliberately: an (order, pose_choice) pair only
+    reconstructs an arrangement by replaying the constructive placer, and
+    the settled positions are not something that replay can produce.
+    """
+    from .solve import Result
+
+    vol = float(np.prod(extents))
+    container = None
+    if packer.bounded:
+        container = np.asarray(packer.container_v) * packer.pitch
+    return Result(extents=np.asarray(extents, dtype=float), volume=vol,
+                  density=previous.lower_bound / vol,
+                  packing=packing, packer=packer,
+                  history=previous.history, lower_bound=previous.lower_bound,
+                  container=container, objective=packer.objective,
+                  config=None, traces=previous.traces,
+                  winner_packing=packing)
 
 
 def _assemble(parts, result, pitch=None):
@@ -189,8 +246,22 @@ def _solve_fixed_container(poses, meshes, container, objective, seed,
                     else "volume", container=container,
                     contact_weight=contact_weight)
     search = Search(packer, seed=seed)
-    iters = max(60, int(budget / 0.08))
-    best = search.run(starts=4, iterations=min(iters, 600))
+
+    # Time one arrangement rather than assuming what one costs.  An
+    # iteration count derived from a guess is what made --time advisory
+    # here: at 80 ms an evaluation it overran a small budget several times
+    # over, while the 600-iteration cap left a large one unspent.  The
+    # count still has to be right, not just bounded -- the annealing
+    # temperature is scheduled against it, so a loop cut short by the
+    # clock alone would never cool.
+    starts = 4
+    probe = time.time()
+    search.evaluate(tuple(range(len(poses))), tuple(0 for _ in poses))
+    per_eval = max(time.time() - probe, 1e-4)
+    iters = int(min(20000, max(60, (budget / starts) / per_eval)))
+
+    best = search.run(starts=starts, iterations=iters,
+                      deadline=time.time() + budget)
     pv = part_volume(poses, meshes)
 
     if not best.packing.feasible:
