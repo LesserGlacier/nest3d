@@ -27,7 +27,8 @@ sys.path.insert(0, str(ROOT))
 from nest3d import pipeline                                 # noqa: E402
 from nest3d.settle import _bbox, _rungs, _settle_once       # noqa: E402
 from nest3d.solve import part_volume                        # noqa: E402
-from nest3d.viewerdata import write                         # noqa: E402
+from nest3d.viewerdata import voxel_shell, write            # noqa: E402
+from nest3d.voxel import build_poses, suggest_pitch         # noqa: E402
 
 
 def _frame(fine, offsets, label, t0, order):
@@ -63,6 +64,38 @@ def _mark_best(frames):
     return frames
 
 
+def _shells(parts, packed, levels):
+    """Collision masks for the orientations the settle actually keeps.
+
+    The settle never re-orients anything, so one mask per part per pitch
+    covers the whole track -- which is exactly why the voxel view belongs
+    on this track and not on the search ones, where a part is in a
+    different orientation in every frame.
+    """
+    meshes = [p.mesh for p in parts]
+    rot = {}
+    for pl in packed.packing.placements:
+        rot[pl.part_index] = packed.packer.poses[pl.part_index][pl.pose_index].rotation
+
+    out = {}
+    for res in levels:
+        pitch = suggest_pitch(meshes, res)
+        shells = []
+        for i, mesh in enumerate(meshes):
+            pose = build_poses(mesh, [rot[i]], pitch, dedup=False)[0]
+            shells.append(voxel_shell(pose, mesh))
+        out[str(res)] = {
+            "pitch": round(float(pitch), 4),
+            "resolution": int(res),
+            "parts": shells,
+        }
+        print("  voxels res=%-4d pitch %6.2f mm   %d skin voxels   ratio %.2f-%.2f"
+              % (res, pitch, sum(s["shell"] for s in shells),
+                 min(s["ratio"] for s in shells),
+                 max(s["ratio"] for s in shells)), flush=True)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("parts", nargs="+")
@@ -74,6 +107,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--budget", type=float, default=120.0,
                     help="seconds allowed per rung while tracing")
+    ap.add_argument("--voxel-resolutions", default="28,160",
+                    help="comma-separated voxel counts across the largest "
+                         "part to ship collision masks for; empty to skip")
     ap.add_argument("--out", default=str(ROOT / "viewer_settle.json"))
     args = ap.parse_args()
 
@@ -112,8 +148,12 @@ def main():
 
     vol, frames, resolution, shake = best
     frames = _mark_best(frames)
+    levels = [int(v) for v in args.voxel_resolutions.split(",") if v.strip()]
+    voxels = _shells(parts, packed, levels) if levels else None
+
     payload = {
         "parts": [{"name": p.name} for p in parts],
+        "voxels": voxels,
         "part_volume": float(part_volume(packed.packer.poses)),
         "settle": {
             "resolution": resolution,

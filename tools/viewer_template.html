@@ -112,6 +112,7 @@
   #barfloor { position: absolute; top: -3px; bottom: -3px; width: 2px;
               background: var(--accent); }
   #barnote { color: var(--faint); font-size: 10.5px; margin-top: 5px; }
+  #voxnote { color: var(--faint); font-size: 10.5px; margin: 8px 0 0; }
 
   .parts { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
   .part {
@@ -221,7 +222,9 @@
       <button id="t-xray" aria-pressed="false">X-ray</button>
       <button id="t-box" aria-pressed="true">Box</button>
       <button id="t-grid" aria-pressed="true">Floor</button>
+      <button id="t-vox" aria-pressed="false">Voxels</button>
     </div>
+    <p id="voxnote"></p>
   </div>
 </div>
 
@@ -295,6 +298,67 @@
     m.matrixAutoUpdate = false;
     group.add(m); meshes.push(m); localVerts.push(pos);
   });
+
+  // ---- collision-mask skins -------------------------------------------
+  // The mask is a conservative superset of the solid, and the gap between
+  // the two is most of why a pack is looser than the parts are.  Built on
+  // demand and cached: the fine lattice is a hundred and fifty thousand
+  // boxes, and most sessions never ask to see it.
+  function buildVoxels(key) {
+    if (voxCache[key]) return voxCache[key];
+    var level = DATA.voxels[key], made = [];
+    var pos = new THREE.Vector3(), quat = new THREE.Quaternion();
+    var one = new THREE.Vector3(1, 1, 1);
+    var mm = new THREE.Matrix4(), basis = new THREE.Matrix4();
+
+    level.parts.forEach(function (v, i) {
+      var r = v.rot, n = v.shell;
+      var inst = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(v.pitch, v.pitch, v.pitch),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(COLORS[i % COLORS.length]),
+          roughness: 0.95, metalness: 0,
+          transparent: true, opacity: 0.28, depthWrite: false
+        }), n);
+      inst.matrixAutoUpdate = false;
+      inst.visible = false;
+      // An InstancedMesh culls on the bounding sphere of its geometry --
+      // one voxel -- so most of a part's skin would vanish the moment
+      // that single box left the frustum.
+      inst.frustumCulled = false;
+      // rot is mask -> mesh.  Turning the boxes by it, under a frame
+      // matrix that turns mesh -> world by its inverse, leaves them
+      // square to the world -- which is what a voxel lattice is.
+      basis.set(r[0], r[1], r[2], 0, r[3], r[4], r[5], 0,
+                r[6], r[7], r[8], 0, 0, 0, 0, 1);
+      quat.setFromRotationMatrix(basis);
+      for (var k = 0; k < n; k++) {
+        var x = (v.idx[3 * k] - v.pad + 0.5) * v.pitch - v.shift[0];
+        var y = (v.idx[3 * k + 1] - v.pad + 0.5) * v.pitch - v.shift[1];
+        var z = (v.idx[3 * k + 2] - v.pad + 0.5) * v.pitch - v.shift[2];
+        pos.set(r[0] * x + r[1] * y + r[2] * z,
+                r[3] * x + r[4] * y + r[5] * z,
+                r[6] * x + r[7] * y + r[8] * z);
+        mm.compose(pos, quat, one);
+        inst.setMatrixAt(k, mm);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      group.add(inst);
+      made.push(inst);
+    });
+    voxCache[key] = made;
+    return made;
+  }
+
+  function voxelsFor(fr, shownFor) {
+    Object.keys(voxCache).forEach(function (k) {
+      var on = voxAt >= 0 && voxLevels[voxAt] === k;
+      voxCache[k].forEach(function (inst, i) {
+        inst.visible = on && shownFor(i);
+        if (on && fr.m[i]) inst.matrix.copy(meshes[i].matrix);
+      });
+    });
+  }
 
   // Bounding box: unit cube scaled per frame, so one object serves every frame.
   var boxEdges = new THREE.LineSegments(
@@ -384,6 +448,11 @@
   var mode = "best";
   var visible = DATA.parts.map(function () { return true; });
   var showBox = true, xray = false;
+  // null, then one key of DATA.voxels: off, the coarse search lattice, the
+  // fine one the settle ran on.
+  var voxLevels = DATA.voxels ? Object.keys(DATA.voxels)
+    .sort(function (a, b) { return a - b; }) : [];
+  var voxAt = -1, voxCache = {};
   var idx = 0, playing = false, lastTick = 0;
 
   var tracks = {
@@ -507,6 +576,10 @@
       meshes[p].material.opacity = xray ? 0.42 : 1;
       meshes[p].material.depthWrite = !xray;
     }
+    voxelsFor(fr, function (i) {
+      return visible[i] && fr.m[i] !== null &&
+             (revealed === null || revealed.indexOf(i) !== -1);
+    });
 
     // Centre the frame's box on the origin so the box stays put and the
     // parts move inside it, rather than the whole pile drifting.
@@ -590,6 +663,13 @@
         .setAttribute("aria-pressed", String(k === next));
     });
     document.getElementById("modehelp").textContent = HELP[next];
+    // A mask belongs to an orientation, and only the settle track holds
+    // every part in one for its whole length.
+    var canVox = next === "settle" && voxLevels.length > 0;
+    voxBtn.disabled = !canVox;
+    voxBtn.style.opacity = canVox ? "" : ".45";
+    voxBtn.style.cursor = canVox ? "" : "default";
+    if (!canVox && voxAt >= 0) setVoxels(-1, true);
     idx = 0; buildTicks(); fitCamera(); render(idx);
   }
   MODES.forEach(function (k) {
@@ -626,6 +706,35 @@
   toggle("t-box", function () { return showBox; }, function (v) { showBox = v; });
   toggle("t-grid", function () { return grid.visible; },
          function (v) { grid.visible = v; });
+
+  // Voxels cycles rather than toggles: off, the coarse lattice the search
+  // ran on, the fine one the settle ran on.  Seeing both is the point --
+  // the coarse skin is what the box was actually packed against.
+  var voxBtn = document.getElementById("t-vox");
+  var voxNote = document.getElementById("voxnote");
+
+  function voxLabel() {
+    if (voxAt < 0) { voxNote.textContent = ""; return; }
+    var lv = DATA.voxels[voxLevels[voxAt]], lo = Infinity, hi = 0;
+    lv.parts.forEach(function (v) {
+      lo = Math.min(lo, v.ratio); hi = Math.max(hi, v.ratio);
+    });
+    voxNote.textContent = lv.pitch.toFixed(2) + " mm lattice · mask is " +
+      lo.toFixed(2) + "–" + hi.toFixed(2) + "× the solid inside it";
+  }
+
+  function setVoxels(next, quiet) {
+    voxAt = next;
+    if (voxAt >= 0) buildVoxels(voxLevels[voxAt]);
+    voxBtn.setAttribute("aria-pressed", String(voxAt >= 0));
+    voxLabel();
+    if (!quiet) render(idx);
+  }
+
+  voxBtn.addEventListener("click", function () {
+    if (voxBtn.disabled) return;
+    setVoxels(voxAt + 1 >= voxLevels.length ? -1 : voxAt + 1);
+  });
 
   var playBtn = document.getElementById("play");
   function setPlaying(v) {
