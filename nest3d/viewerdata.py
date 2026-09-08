@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+from scipy import ndimage
 
 from .trace import frame_matrices
 
@@ -22,6 +23,41 @@ def _geometry(mesh, round_to=2):
         "indices": [int(i) for i in f.reshape(-1)],
         "vertex_count": int(len(v)),
         "triangle_count": int(len(f)),
+    }
+
+
+def voxel_shell(pose, mesh):
+    """The collision mask's outer skin, in the part's own mesh coordinates.
+
+    What this is for: the mask is a conservative *superset* of the solid --
+    a voxel is filled when any triangle touches it -- and that skin is the
+    whole reason a pack is looser than the parts really are.  Drawing it
+    next to the mesh is the only way to see how much of a box is slack the
+    algorithm could not have known was there.
+
+    Only the skin is shipped, not the solid interior: a filled mask is
+    twenty times the voxels and every one of them is hidden behind the
+    ones sent here.
+
+    Voxel indices go out as integers rather than positions.  The viewer
+    rebuilds a centre as ``rot . ((idx - pad + 0.5) * pitch - shift)``,
+    which is the pose-local lattice mapped back through the pose's own
+    rotation, so the boxes land in the same coordinates as the geometry
+    and ride the same per-frame matrix.
+    """
+    shell = pose.mask & ~ndimage.binary_erosion(pose.mask)
+    idx = np.argwhere(shell).astype(np.int32)
+    return {
+        "pitch": round(float(pose.pitch), 4),
+        "pad": int(pose.pad),
+        "shift": [round(float(v), 4) for v in pose.shift],
+        # Transposed on the way out: the viewer needs mask -> mesh, and the
+        # pose stores mesh -> mask.
+        "rot": [round(float(v), 6) for v in np.asarray(pose.rotation).T.reshape(-1)],
+        "idx": [int(v) for v in idx.reshape(-1)],
+        "shell": int(len(idx)),
+        "filled": int(pose.filled),
+        "ratio": round(float(pose.filled * pose.pitch ** 3 / abs(mesh.volume)), 3),
     }
 
 

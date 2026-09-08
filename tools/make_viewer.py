@@ -23,13 +23,20 @@ def _settle_track(payload, traced):
         raise SystemExit("--settle-from has different parts; refusing to merge")
     where = {n: i for i, n in enumerate(have)}
     pick = [where[n] for n in want]
+
+    # Masks travel with the track: they belong to the orientations the
+    # settle holds fixed, and are meaningless against any other frame.
+    vox = traced.get("voxels") or {}
+    for level in vox.values():
+        level["parts"] = [level["parts"][i] for i in pick]
+
     out = []
     for fr in traced["settle"]["frames"]:
         f = dict(fr)
         f["m"] = [fr["m"][i] for i in pick]
         f["order"] = list(range(len(want)))
         out.append(f)
-    return out
+    return out, vox
 
 
 def main():
@@ -55,7 +62,9 @@ def main():
         payload["stats"]["walk_evaluated"] = other["stats"]["evaluated"]
     if args.settle_from:
         other = json.loads(Path(args.settle_from).read_text())
-        payload["tracks"]["settle"] = _settle_track(payload, other)
+        payload["tracks"]["settle"], vox = _settle_track(payload, other)
+        if vox:
+            payload["voxels"] = vox
     html = Path(args.template).read_text(encoding="utf-8")
 
     # </script> inside a JSON string would close the host script tag early.
@@ -71,6 +80,9 @@ def main():
     print("  parts   %d" % len(payload["parts"]))
     if payload["tracks"].get("settle"):
         print("  settle  %d frames" % len(payload["tracks"]["settle"]))
+    for key, lv in sorted((payload.get("voxels") or {}).items()):
+        print("  voxels  %s mm lattice, %d skin voxels"
+              % (lv["pitch"], sum(p["shell"] for p in lv["parts"])))
     print("  best    %d frames" % len(payload["tracks"]["best"]))
     print("  search  %d frames" % len(payload["tracks"]["search"]))
     print("  from    %d evaluations" % payload["stats"]["evaluated"])
