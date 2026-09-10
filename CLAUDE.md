@@ -18,9 +18,23 @@ The real path is machine-specific and confidential, so it is not committed. It
 lives in **`local.env`** (gitignored) next to this file. Source it, or set the
 variable yourself:
 
+**Quote the value in `local.env`.** The path has spaces in it, and an
+unquoted one is word-split by `.` -- `set -a; . ./local.env` reports
+`Drive/External: No such file or directory` and leaves the variable unset,
+so the run silently falls back to the samples, which is the exact trap
+this file exists to close.
+
+```sh
+# local.env
+NEST3D_PARTS="X:/dir with spaces/*.step"
+```
+
 ```sh
 set -a; . ./local.env; set +a          # bash
-Get-Content local.env | % { $k,$v = $_ -split '=',2; Set-Item "env:$k" $v }
+```
+```powershell
+Get-Content local.env | % { $k,$v = $_ -split '=',2
+                            Set-Item "env:$k" ($v -replace '^"|"$') }
 ```
 
 If `local.env` is missing on a new machine, the parts are on Google Drive and
