@@ -196,18 +196,21 @@ same way -- verified by exact pairwise mesh booleans on every arrangement
 below, all clear.
 
 It also does not pay. On one arrangement, on one lattice, in isolation, it
-is worth a full point of density (45.40% to 46.39%). Against the whole
-ladder that collapses to almost nothing, because the finer rungs were
-already reaching the same place by another route:
+is worth a full point of density. Against the whole ladder that collapses
+to almost nothing, because the finer rungs were already reaching the same
+place by another route. On three arrangements of nine real parts --
+thin-walled hollow vessels, which nest into each other and are the case
+this tool exists for:
 
 | arrangement | ladder | ladder, every rung tilted |
 |---|---|---|
-| A | 46.88% (35s) | 47.15% (187s) |
-| B | 45.63% (44s) | 45.78% (250s) |
-| C | 43.95% (49s) | 43.95% (104s) |
-| D | 44.53% (44s) | 44.75% (241s) |
+| A | 50.85% (43s) | 51.09% (126s) |
+| B | 52.65% (38s) | 53.08% (169s) |
+| C | 54.21% (51s) | 54.24% (159s) |
 
-0.16 points for 4.6x the time. And adding tilted rungs *alongside* the
+0.23 points for 3.4x the time. The nine sample parts agree, at 0.16 points
+for 4.6x -- so this is not an artefact of either part set. And adding
+tilted rungs *alongside* the
 plain ones is worse than not having them, which is the part worth
 remembering: the rungs share one wall-clock deadline, so six dear rungs
 take time from six cheap ones that pay more often. At the settle's normal
@@ -222,10 +225,50 @@ accepted. The pass needs a settle budget several times the default even to
 fire, and the default is what a 60-second run gives it.
 
 So the pass stays, behind a flag that is off by default, rather than being
-deleted: it was measured on one set of nine sample parts, and the effect it
-corrects is largest for parts whose bounding box swings hardest on a degree
-or two of tilt -- long flat plates, not the stubby hubs and brackets here.
-On parts like that it may well earn its cost. It does not earn it on these.
+deleted. The effect it corrects is largest for parts whose bounding box
+swings hardest on a degree or two of tilt -- long flat plates. Neither part
+set measured here is that shape, so the flag is left in reach rather than
+thrown away.
+
+**Running the placement correlation on a GPU.** Four fifths of a run's wall
+clock is inside `scipy.signal.fftconvolve`, which reads like a
+GPU-shaped problem and is not one. The baseline is the trap: the search
+already fans out over every core, so the comparison is not one CPU core
+against the GPU but *all* of them against it.
+
+Measured on an RTX 4060 against 24 cores, at the (pile, mask) shapes an
+actual nine-part run asks for -- `tools/fft_bench.py`:
+
+| pile | mask | 1 core | 24 cores | GPU | vs all |
+|---|---|---|---|---|---|
+| 46x55x85 | 16x17x29 | 10.72ms | 0.45ms | 0.38ms | 1.2x |
+| 50x59x83 | 16x16x28 | 19.58ms | 0.82ms | 0.33ms | 2.5x |
+| 48x46x58 | 9x9x15 | 3.72ms | 0.16ms | 0.46ms | 0.3x |
+| 40x40x29 | 13x7x8 | 0.56ms | 0.02ms | 0.34ms | 0.1x |
+
+Read the GPU column rather than the ratios: it is flat at 0.3 to 0.5 ms
+whatever the size. That is not compute, it is plan lookup and kernel
+launch. The transforms here average 1.6e5 voxels, far too small to occupy
+the device, so a per-call port pays a fixed floor and gets nothing for it
+-- and on the commoner small shapes it is a straight loss.
+
+Batching is the only thing that could amortise that floor, and it tops out
+too: per correlation 0.21 ms at a batch of 4, rising to 0.42 ms and
+plateauing from 16 up, where the device is genuinely saturated. Against 24
+cores' 0.82 ms that is 1.9x on the most favourable shape in the workload.
+Through Amdahl, a whole port is worth about 1.5x end to end -- and only
+after the annealing chains are restructured into one process stepping in
+lockstep on a common padded shape, because placement *within* an
+arrangement is sequential and cannot be batched at all.
+
+Cheaper things are worth more first: roughly 25 s of every run is fixed
+process-pool startup, and the mask side of every correlation is
+re-transformed on each call although the pose has not changed.
+
+None of this is a statement about GPUs in general. It is a statement about
+many small transforms on one mid-range card: pack forty parts instead of
+nine, or settle at a much finer pitch, and the arrays grow into the regime
+where the answer flips.
 
 **Which is also the answer to "why not simulate the physics".** A rigid-body
 sim buys exactly one thing over the geometry here — parts moving together,
