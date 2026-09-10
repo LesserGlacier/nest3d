@@ -85,6 +85,20 @@ SHAKE_DIRS = (
     (-1, -1, -1), (1, 1, 1),
 )
 
+# Tilts tried by the orientation pass, in degrees, about each lattice axis
+# and in both directions.  Small on purpose: the search already chose the
+# pose, and this pass exists to correct that choice by the amount the
+# coarse mask could have got it wrong, not to search SO(3) again.  Two
+# magnitudes rather than one because the useful correction is not the same
+# size on every part -- a flat plate cares about a degree, a stubby hub
+# does not notice five.
+ORIENT_ANGLES = (1.5, 4.0)
+
+# Rounds of the orientation pass allowed per settle.  A second round pays
+# because the first one's re-seats change what a tilt can reach; a third
+# has never moved anything on the sample parts.
+ORIENT_ROUNDS = 2
+
 
 def _measure(objective, ext):
     """The quantity being minimised, with volume as the tie-break.
@@ -296,8 +310,125 @@ def _shake(pile, fine, offsets, part, window, objective, container, dilated,
     return _hug(pile, dilated, tied, here)
 
 
+def _tilt(axis, degrees):
+    """Rotation about one lattice axis, as a 3x3 matrix."""
+    a = np.deg2rad(degrees)
+    c, s = np.cos(a), np.sin(a)
+    m = np.eye(3)
+    j, k = (axis + 1) % 3, (axis + 2) % 3
+    m[j, j] = c
+    m[j, k] = -s
+    m[k, j] = s
+    m[k, k] = c
+    return m
+
+
+def _orient_rotations(rot):
+    """Small tilts of an already-chosen pose, about the lattice axes.
+
+    Applied on the left, so the tilt is about the axes of the lattice the
+    part is sitting on rather than about the part's own axes -- the box is
+    axis-aligned, and it is the part's silhouette against those axes that
+    decides the box.
+    """
+    for axis in range(3):
+        for deg in ORIENT_ANGLES:
+            for sign in (1, -1):
+                yield _tilt(axis, sign * deg) @ rot
+
+
+def _seat_for(pose, here, old_pose, pile):
+    """Where a re-voxelised pose sits if the part does not move.
+
+    A tilted pose has its own lattice -- different padding, different
+    extents -- so "the same place" has to be restated rather than reused.
+    Anchoring the AABB centre keeps the part where it stands instead of
+    letting it drift toward whichever corner the new pose happens to pad.
+    """
+    lo = (np.asarray(here, dtype=float) + old_pose.pad) * old_pose.pitch
+    centre = lo + old_pose.extents / 2.0
+    target = (centre - pose.extents / 2.0) / pose.pitch - pose.pad
+    seat = np.round(target).astype(np.int64)
+    return np.clip(seat, 0, pile.shape - pose.shape)
+
+
+def _reorient(pile, fine, offsets, part, window, objective, container,
+              meshes, pitch, clearance_voxels):
+    """Re-choose one part's orientation on the settle's own lattice.
+
+    Every orientation in a finished pack was chosen by the search, at the
+    coarse pitch, where a part's mask runs 1.2 to 2.2 times the solid
+    inside it.  At that fatness the mask's *shape* is substantially not
+    the part's shape, so the pose that scored best there was ranked on
+    geometry that is not quite the part.  Here the masks are within a few
+    per cent of the solid, and the ranking can be redone on something much
+    closer to the real thing.
+
+    This is deliberately a tilt and not a re-search: the arrangement is
+    worth keeping, and a pose far from the current one would land the part
+    somewhere the rest of the pile is not expecting it.  Each candidate is
+    voxelised at the settle pitch, seated where the part already stands,
+    and then given the same windowed re-seat every other pass uses.
+
+    Monotone by the same rule as the rest of the settle: the incumbent
+    pose at its current offset is one of the things measured, and a
+    candidate is taken only if it makes the box strictly smaller.  Returns
+    ``(pose, offset)`` or ``None`` if nothing beat standing still.
+    """
+    here = offsets[part]
+    incumbent = fine[part]
+
+    got = _fields(pile, fine, offsets, part, window, objective, container)
+    if got is None:
+        # The part has no free seat even where it is, which only happens
+        # against the edge of the pile.  Leave it to the sweeps.
+        return None
+    lo, score, volume = got
+    seat_ix = tuple(here - lo)
+    best = (float(score[seat_ix]), float(volume[seat_ix]))
+    if not np.isfinite(best[0]):
+        return None
+
+    found = None
+    for rot in _orient_rotations(incumbent.rotation):
+        pose = build_poses(meshes[part], [rot], pitch, dedup=False,
+                           clearance_voxels=clearance_voxels)[0]
+        if np.any(pose.shape >= pile.shape):
+            # A tilt grows the part's AABB, and the pile is only sized for
+            # the poses it was built with.  Rather than grow the lattice
+            # for a candidate that probably loses anyway, drop it.
+            continue
+        seat = _seat_for(pose, here, incumbent, pile)
+        fine[part], offsets[part] = pose, seat
+        cand = _fields(pile, fine, offsets, part, window, objective, container)
+        if cand is None:
+            continue
+        c_lo, c_score, c_vol = cand
+        m = float(c_score.min())
+        if not np.isfinite(m) or m > best[0] * (1 + 1e-12):
+            continue
+        at = c_score <= m * (1 + 1e-12)
+        v = float(c_vol[at].min())
+        # Volume decides a tie on the objective, exactly as it does in
+        # ``_reseat``: under --objective height a shorter footprint at the
+        # same height is worth taking, and a taller one never is.
+        if (m, v) >= best:
+            continue
+        at &= c_vol <= v * (1 + 1e-12)
+        best = (m, v)
+        cands = np.argwhere(at) + c_lo
+        # Of the offsets that tie, the one nearest where the part was
+        # seated: a tilt is already a change, and there is no reason to
+        # add a translation the objective did not ask for.
+        near = int(np.argmin(np.abs(cands - seat).sum(axis=1)))
+        found = (pose, cands[near])
+
+    fine[part], offsets[part] = incumbent, here
+    return found
+
+
 def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
-                 deadline, shake, on_frame=None):
+                 deadline, shake, orient=False, on_frame=None):
     """One settle, on one lattice.  The unit of work the ladder runs.
 
     Returns ``(measure, packer, packing, extents, pitch)`` for the settled
@@ -317,7 +448,16 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
 
     # Room for every part to move outward as well as in, on both sides.
     window = int(np.ceil(packer.pitch / pitch)) + EXTRA_WINDOW
-    margin = np.full(3, window + 2, dtype=np.int64)
+    grow = 0
+    if orient:
+        # A tilted part's AABB is larger than the upright one's, and the
+        # pile has to hold the largest candidate rather than the pose it
+        # was built from.  Turning a box of diagonal d by theta cannot add
+        # more than d*sin(theta) to any axis, which is the bound used here.
+        widest = max(float(np.linalg.norm(m.extents)) for m in meshes)
+        grow = int(np.ceil(widest * np.sin(np.deg2rad(max(ORIENT_ANGLES)))
+                           / pitch)) + 1
+    margin = np.full(3, window + 2 + grow, dtype=np.int64)
     span = np.zeros(3, dtype=np.int64)
     for pl in packing.placements:
         coarse = packer.poses[pl.part_index][pl.pose_index]
@@ -380,22 +520,63 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
         return sweep(lambda part: _shake(pile, fine, offsets, part, window,
                                          objective, container, dilated[part], d))
 
+    def orient_pass():
+        """Re-choose every part's orientation once, face parts first.
+
+        Unlike the sweeps this replaces the pose as well as the offset, so
+        the part's mask and its dilation both have to be rebuilt when one
+        is taken.  The pile is repainted with whichever pose ends up
+        winning, so the lattice is never left holding a mask that no part
+        is standing in.
+        """
+        moved = 0
+        lo, hi = _bbox(fine, offsets)
+
+        def on_face(i):
+            a, b = fine[i].aabb(offsets[i])
+            return -int(np.count_nonzero((a <= lo + 1e-6) | (b >= hi - 1e-6)))
+
+        for part in sorted(offsets, key=lambda i: (on_face(i), i)):
+            if out_of_time():
+                break
+            pile.paint(fine[part], offsets[part], on=False)
+            got = _reorient(pile, fine, offsets, part, window, objective,
+                            container, meshes, pitch, clearance_voxels)
+            if got is not None:
+                pose, off = got
+                fine[part], offsets[part] = pose, off
+                dilated[part] = ndimage.binary_dilation(
+                    pose.mask, np.ones((3, 3, 3), bool))
+                moved += 1
+            pile.paint(fine[part], offsets[part])
+        return moved
+
     # Each direction is tipped at most twice: a second cycle is worth having
     # because the first one's re-seats change what the same tip can reach,
     # and a third almost never moves anything.
     tips = list(SHAKE_DIRS) * SHAKE_CYCLES if shake else []
     tipped = 0
+    rounds = ORIENT_ROUNDS if orient else 0
+    oriented = 0
 
     def note(label):
         if on_frame is not None:
             on_frame(fine, offsets, label)
 
-    for _ in range(sweeps + len(tips)):
+    for _ in range(sweeps + len(tips) + rounds):
         if out_of_time():
             break
         if reseat_pass():
             note("settle")
             continue
+        # Sliding has run out of moves.  Before tipping -- which only
+        # relocates slack and needs another sweep to cash it in -- try
+        # turning the parts, which can shrink the box on its own.
+        if oriented < rounds:
+            oriented += 1
+            if orient_pass():
+                note("orient")
+                continue
         # The objective sweep has run out of moves.  That does not mean the
         # arrangement is tight -- only that no part can shrink the box on
         # its own from where it stands.  Tip the box to change where it
@@ -447,15 +628,40 @@ def _settle_once(meshes, packer, packing, resolution, clearance, sweeps,
 # and only sometimes pay -- on one arrangement they were the best result
 # by a full point of density, on another they moved 37 parts and changed
 # the box by nothing at all.
-LADDER = ((1.0, False), (4 / 3, False), (5 / 3, False), (2.0, False),
-          (4 / 3, True), (5 / 3, True))
+#
+# No rung re-orients.  That pass exists and is sound (--settle-orient), but
+# adding rungs for it measured worse than leaving it out: see the note in
+# README.md.  The rungs share one wall-clock deadline, and a dear rung that
+# rarely pays takes time from cheap ones that usually do.
+#
+# Each entry is (pitch multiplier, tip, re-orient).
+LADDER = ((1.0, False, False), (4 / 3, False, False), (5 / 3, False, False),
+          (2.0, False, False), (4 / 3, True, False), (5 / 3, True, False))
 
 
-def _rungs(resolution, workers):
-    """The ladder, as far up it as there are cores to climb."""
+def _rungs(resolution, workers, orient=None):
+    """The ladder, as far up it as there are cores to climb.
+
+    ``orient`` of None lets each rung carry its own setting, which is what
+    a normal run wants; True or False forces every rung one way, which is
+    how the two are measured against each other on the same arrangements.
+    """
     n = max(1, min(int(workers), len(LADDER)))
-    return [(max(8, int(round(resolution * m))), shake)
-            for m, shake in LADDER[:n]]
+    rungs = []
+    for m, shake, turn in LADDER[:n]:
+        if orient is not None:
+            turn = bool(orient)
+        rungs.append((max(8, int(round(resolution * m))), shake, turn))
+    if orient is not None:
+        # Forcing the flag can make two rungs identical; running the same
+        # lattice twice measures nothing.
+        seen, out = set(), []
+        for r in rungs:
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
+        rungs = out
+    return rungs
 
 
 _SHARED = {}
@@ -467,10 +673,10 @@ def _init_worker(shared):
 
 def _worker(rung):
     meshes, packer, packing, clearance, sweeps, deadline = _SHARED["v"]
-    resolution, shake = rung
+    resolution, shake, turn = rung
     try:
         return _settle_once(meshes, packer, packing, resolution, clearance,
-                            sweeps, deadline, shake)
+                            sweeps, deadline, shake, turn)
     except Exception:
         # One rung failing is not a reason to lose the others, and the
         # arrangement handed in is still there to fall back on.
@@ -478,11 +684,15 @@ def _worker(rung):
 
 
 def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
-           budget=None, workers=1, say=None, on_frame=None):
+           budget=None, workers=1, orient=None, say=None, on_frame=None):
     """Shake a finished arrangement down onto a finer lattice.
 
     ``resolution`` is the first rung of the ladder in voxels across the
     largest part; ``workers`` decides how many rungs above it are tried.
+
+    ``orient`` of None lets each rung decide whether to re-choose the
+    parts' orientations; True or False forces it on or off everywhere,
+    which is how the pass is measured rather than how it is used.
 
     ``on_frame(poses, offsets, label)`` is called after every pass that
     moved something, for tracing.  It only applies to a single-rung run:
@@ -503,7 +713,7 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
     t0 = time.time()
     objective = "height" if packer.objective in ("height", "fit") else "volume"
     start = _measure(objective, packing.extents)
-    rungs = _rungs(resolution, workers)
+    rungs = _rungs(resolution, workers, orient)
     # An absolute deadline, not a duration: the rungs run in processes that
     # take a second or two to start, and a duration would hand each of them
     # a fresh full budget from whenever it happened to get going.
@@ -512,7 +722,8 @@ def settle(meshes, packer, packing, resolution=96, clearance=0.0, sweeps=8,
 
     if len(rungs) == 1:
         results = [_settle_once(meshes, packer, packing, rungs[0][0], clearance,
-                                sweeps, deadline, rungs[0][1], on_frame)]
+                                sweeps, deadline, rungs[0][1], rungs[0][2],
+                                on_frame)]
     else:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=len(rungs),

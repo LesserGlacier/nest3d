@@ -10,3 +10,4 @@ viewer_multi.json
 viewer_walk.json
 results_glass/
 *.log
+local.env

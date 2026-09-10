@@ -74,8 +74,8 @@ def build_orientations(parts, preset="rest", n_random=None, seed=0, log=None):
 def run(paths, objective="volume", resolution=28, refine_resolution=48,
         pitch=None, clearance=0.0, orientations="rest", n_random=None,
         container=None, time_budget=120.0, seed=0, split_solids=False,
-        refine=True, settle=True, settle_resolution=96, contact_weight=0.0,
-        workers=1, verbose=True, on_phase=None):
+        refine=True, settle=True, settle_resolution=96, settle_orient=None,
+        contact_weight=0.0, workers=1, verbose=True, on_phase=None):
     """Load, orient, pack, refine and settle.  Returns a PipelineResult."""
     log = []
 
@@ -181,7 +181,7 @@ def run(paths, objective="volume", resolution=28, refine_resolution=48,
             meshes, result.packer, result.packing,
             resolution=settle_resolution, clearance=clearance,
             budget=max(5.0, time_budget * settle_share), workers=workers,
-            say=say)
+            orient=settle_orient, say=say)
         timings["settle"] = time.time() - t0
         if settled is not None:
             s_packer, s_packing, s_ext = settled
