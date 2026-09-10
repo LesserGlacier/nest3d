@@ -122,6 +122,7 @@ nest inside a tube. Only fully enclosed cavities are filled, which is right
 | `--refine-resolution N` | pitch for the final tightening pass (default 48). |
 | `--settle-resolution N` | first lattice for the closing settle (default 96). Finer ones are tried alongside it, one per worker, and the smallest box wins — so `--workers` buys settle quality too. |
 | `--no-settle` | skip the settle and report the arrangement exactly as the search left it. |
+| `--settle-orient` | let the settle re-choose each part's orientation, not just its position. Off by default, and see below for why. |
 | `--clearance MM` | minimum gap to hold between parts. Half is applied to each part, so the gap you ask for is the gap you get. |
 | `--orientations` | `axis` = the 24 box rotations; `rest` (default) adds stable resting poses; `fine`/`full` add sampled SO(3) for genuinely oblique placements. |
 | `--container W D H` | fixed box: answers "do these fit?" instead of minimising. `inf` leaves an axis free. |
@@ -180,6 +181,51 @@ escape the same trap, and tipping is the cheaper way out. Once the sweeps
 and the tips have run, a one-voxel shrink on any face is genuinely
 infeasible: the relaxation gets within about seventy voxels of overlap and
 five times the effort does not close them.
+
+**Re-choosing the orientations during the settle.** Every orientation in a
+finished pack was picked by the search, at the coarse pitch, where a
+part's mask runs 1.2 to 2.2 times the solid inside it -- so the pose that
+scored best was ranked on a shape that is substantially not the part's.
+The settle has masks within a few per cent of the solid and could rank
+them again. It does exactly that under `--settle-orient`: each part is
+re-voxelised at 1.5 and 4 degrees about each lattice axis, in both
+directions, re-seated by the same windowed sweep as everything else, and
+kept only if the box strictly shrinks. It is monotone for the same reason
+the rest of the settle is, and it re-earns the no-overlap guarantee the
+same way -- verified by exact pairwise mesh booleans on every arrangement
+below, all clear.
+
+It also does not pay. On one arrangement, on one lattice, in isolation, it
+is worth a full point of density (45.40% to 46.39%). Against the whole
+ladder that collapses to almost nothing, because the finer rungs were
+already reaching the same place by another route:
+
+| arrangement | ladder | ladder, every rung tilted |
+|---|---|---|
+| A | 46.88% (35s) | 47.15% (187s) |
+| B | 45.63% (44s) | 45.78% (250s) |
+| C | 43.95% (49s) | 43.95% (104s) |
+| D | 44.53% (44s) | 44.75% (241s) |
+
+0.16 points for 4.6x the time. And adding tilted rungs *alongside* the
+plain ones is worse than not having them, which is the part worth
+remembering: the rungs share one wall-clock deadline, so six dear rungs
+take time from six cheap ones that pay more often. At the settle's normal
+budget twelve rungs gave 44.67% against the plain six's 44.91%; at five
+times that budget, 45.22% against 45.25%. A ladder that keeps the smallest
+box cannot lose on merit -- it lost on contention.
+
+There is a plainer symptom of the same thing. Asked for `--settle-orient`
+on a 60-second budget, the run reports every part at a clean multiple of 45
+degrees -- the settle's 8.8-second slice ran out before a single tilt was
+accepted. The pass needs a settle budget several times the default even to
+fire, and the default is what a 60-second run gives it.
+
+So the pass stays, behind a flag that is off by default, rather than being
+deleted: it was measured on one set of nine sample parts, and the effect it
+corrects is largest for parts whose bounding box swings hardest on a degree
+or two of tilt -- long flat plates, not the stubby hubs and brackets here.
+On parts like that it may well earn its cost. It does not earn it on these.
 
 **Which is also the answer to "why not simulate the physics".** A rigid-body
 sim buys exactly one thing over the geometry here — parts moving together,

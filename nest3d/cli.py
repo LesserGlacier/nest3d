@@ -79,6 +79,13 @@ def build_parser():
                         "first lattice (default 96). Finer ones are tried "
                         "alongside it, one per worker, and the smallest box "
                         "wins -- so --workers buys settle quality too.")
+    p.add_argument("--settle-orient", dest="settle_orient",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="re-choose each part's orientation during the settle, "
+                        "on the settle's own lattice rather than the coarse "
+                        "one the search picked it on. Left alone, some rungs "
+                        "of the ladder do this and some do not; the flag "
+                        "forces it on or off everywhere.")
     p.add_argument("--contact", dest="contact_weight", type=float, default=0.0,
                    help="tie-break weight favouring snug placements "
                         "(0 disables, 1 is a good value to try)")
@@ -161,6 +168,7 @@ def main(argv=None):
              refine=not args.no_refine,
              settle=not args.no_settle,
              settle_resolution=args.settle_resolution,
+             settle_orient=args.settle_orient,
              contact_weight=args.contact_weight,
              workers=args.workers,
              verbose=not args.quiet,

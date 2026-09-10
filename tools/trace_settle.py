@@ -128,17 +128,17 @@ def main():
           flush=True)
 
     best = None
-    for resolution, shake in _rungs(args.settle_resolution, args.workers):
+    for resolution, shake, turn in _rungs(args.settle_resolution, args.workers):
         frames = []
         t0 = time.time()
         got = _settle_once(
             [p.mesh for p in parts], packed.packer, packed.packing, resolution,
-            0.0, 8, t0 + args.budget, shake,
+            0.0, 8, t0 + args.budget, shake, turn,
             lambda fine, offsets, label: frames.append(
                 _frame(fine, offsets, label, t0, order)))
         vol = float(np.prod(got[3])) if got else float("inf")
-        print("  rung res=%-4d tip=%-5s  %d frames   vol %.4g   (%.1fs)"
-              % (resolution, shake, len(frames), vol, time.time() - t0),
+        print("  rung res=%-4d tip=%-5s turn=%-5s  %d frames   vol %.4g   (%.1fs)"
+              % (resolution, shake, turn, len(frames), vol, time.time() - t0),
               flush=True)
         if got is not None and (best is None or vol < best[0]):
             best = (vol, frames, resolution, shake)
