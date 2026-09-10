@@ -153,6 +153,34 @@ Because the masks are conservative, a reported density of 45% means the box
 is genuinely 45% solid part — the slack is real clearance between parts,
 not measurement error.
 
+Four fifths of a run is inside the placement correlation, and the mask
+half of it is the same transform over and over: a pose is built once and
+placed thousands of times, so 77% of the correlations in a nine-part run
+ask for a (mask, transform shape) pair that process has already done.
+Caching those is worth **1.16x on identical work** -- measured by giving
+the solver a budget it cannot reach, so every configuration does the same
+work and lands on the same box, agreeing to the last cubic millimetre.
+`tools/bench_fixedwork.py` is that measurement:
+
+| cache per process | wall, 24 chains | |
+|---|---|---|
+| off | 83.4 s | |
+| 16 MB | 73.8 s | 1.13x |
+| 32 MB (default) | 72.0 s | 1.16x |
+| 128 MB | 70.0 s | 1.19x |
+
+The cache is bounded in bytes rather than entries, because the transform
+is padded out to the shape the *pile* needs: one mask has as many
+transforms as it has neighbourhood sizes, each the size of a pile
+transform rather than of the mask. Keeping all of them costs 6.6 GB, and
+counting entries is no use when they differ in size by two orders of
+magnitude -- 32 of them is 193 MB in one process, and there are two dozen
+processes. At the default 32 MB per process the cache takes 60% of the
+transforms a perfect one would, against a ceiling of 77%. The table above
+is where that default comes from: most of the win is bought by the first
+32 MB, and the last 96 MB buys 3% more for four times the memory in every
+worker. `NEST3D_FFT_CACHE_MB` moves it.
+
 ## Things that were tried and are not here
 
 **A bigger search window for the settle.** Tripling and quintupling the
@@ -261,14 +289,62 @@ after the annealing chains are restructured into one process stepping in
 lockstep on a common padded shape, because placement *within* an
 arrangement is sequential and cannot be batched at all.
 
-Cheaper things are worth more first: roughly 25 s of every run is fixed
-process-pool startup, and the mask side of every correlation is
-re-transformed on each call although the pose has not changed.
+Of the two cheaper things this section used to point at, one paid and one
+did not. The mask side of every correlation was being re-transformed on
+every call although the pose had not changed; it is now cached, and it is
+worth 1.16x on identical work -- see "Accuracy and cost". The process-pool
+startup is the entry below.
 
 None of this is a statement about GPUs in general. It is a statement about
 many small transforms on one mid-range card: pack forty parts instead of
 nine, or settle at a much finer pitch, and the arrays grow into the regime
 where the answer flips.
+
+**Bringing the worker pool up before giving it work.** A
+`ProcessPoolExecutor` is not ready when it is constructed. Workers are
+spawned as tasks are submitted, and each then re-imports nest3d and
+unpickles the poses. Instrumented on a nine-part run at 24 workers, the
+first worker was ready in 0.6 s and the last in 27.2 s -- more than half
+of a 52 s phase spent at less than full width. An idle pool of the same
+size costs 4.5 s, so the other 22 s is the workers still importing while
+the ones already up saturate the machine. That reads like 20 s to be had
+for nothing, and it was where "roughly 25 s of every run is fixed
+process-pool startup" came from.
+
+It is not. Holding every worker at a common instant before submitting any
+real work does exactly what it promises -- the ramp shortens, and the
+later pools come up in about 3 s instead of 8 -- and the run gets
+*slower*. On identical work it is 0.92x, and at a fixed 60 s budget it
+costs 1.4 density points over six seeds, never winning on any of them:
+
+| | density, mean of 6 seeds | wall, identical work |
+|---|---|---|
+| as it is | 53.42% | 63.4 s |
+| pool warmed first | 51.99% | 68.6 s (0.92x) |
+
+(Density at a 60 s budget and 24 workers; wall on fixed work, at the
+lighter settings `bench_fixedwork.py` defaults to. A longer hold was worse
+on both counts.)
+
+The reason is that a chain is given a *duration*, not a deadline, and the
+run keeps the best of twenty-four of them rather than the mean. Left
+alone, the workers arrive staggered, so the early chains run against a
+half-empty machine and get more iterations inside their budget than they
+would have otherwise. Warming the pool takes that away: all twenty-four
+start together, contend equally, and every one of them does less. The
+ramp was not waste, it was a head start -- and the fan-out is only as good
+as its luckiest chain.
+
+The same reasoning says what would change the answer: chains cut off by a
+common absolute deadline, or many more chains than cores, would both make
+the staggering worthless and the warm-up worth having. Neither is how this
+runs today.
+
+Reusing one pool across the rounds of a squeeze, rather than building a
+fresh one per round, was measured at the same time and is not here either
+-- for the duller reason that it changes nothing. A squeeze almost always
+stops after one round, and on the runs where refine took two, the second
+wanted more workers than the first, so the pool was rebuilt regardless.
 
 **Which is also the answer to "why not simulate the physics".** A rigid-body
 sim buys exactly one thing over the geometry here — parts moving together,
@@ -304,6 +380,8 @@ nest3d/solve.py      free phase, squeeze phase, parallel chains
 nest3d/settle.py     the closing settle on a much finer lattice
 nest3d/pipeline.py   coarse -> fine -> settle orchestration
 nest3d/report.py     summary, JSON, exports
+tools/               benchmarks and diagnostics, none of them on the
+                     import path of a run
 tests/               correctness tests and the sample-part generator
 examples/compare.py  this packer against the simpler alternatives
 ```
