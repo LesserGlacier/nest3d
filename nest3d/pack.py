@@ -15,10 +15,12 @@ order and orientation choices on top (search.py).
 """
 from __future__ import annotations
 
+import os
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import ndimage, signal
+from scipy import fft as sp_fft, ndimage
 
 from .voxel import exact_overlap
 
@@ -62,12 +64,106 @@ class Packing:
         return float("inf") if e is None else float(np.prod(e))
 
 
+# ---------------------------------------------------------------------------
+# The mask-transform cache
+# ---------------------------------------------------------------------------
+#
+# Every correlation transforms two arrays: the pile region, which is
+# different each time, and the part's mask, which is not.  A pose is built
+# once and placed thousands of times, so the mask transform is the same
+# computation repeated -- 77% of the correlations in a nine-part run ask
+# for a (mask, transform shape) pair that has already been done in that
+# process.
+#
+# It cannot simply be memoised, because the transform is padded out to the
+# shape the *pile* region needs, so one mask has as many transforms as it
+# has neighbourhood sizes, and each is the size of a pile transform rather
+# than of the mask.  Holding all 5,060 of them costs 6.6 GB.  Nor is an
+# entry-count LRU any use, when the entries differ in size by two orders
+# of magnitude: 32 of them is 193 MB in one process, and there are two
+# dozen processes.  So the cache is bounded in bytes, and the budget is
+# per process -- every worker keeps its own.
+#
+# Worth 1.16x on identical work at the default size; the curve against
+# cache size, and the reasoning, are in README.md under "Accuracy and
+# cost", and tools/bench_fixedwork.py is the measurement.
+#
+# The key holds the mask's id, and the entry holds a reference to the mask
+# alongside its transform.  That reference is what makes the id safe --
+# while an entry lives its mask cannot be collected, so no other array can
+# be given the same id.  It assumes a mask is never mutated in place, which
+# is true of poses: they are built once and only ever read.
+
+_CACHE_MB = float(os.environ.get("NEST3D_FFT_CACHE_MB", 32))
+_mask_cache = OrderedDict()
+_mask_cache_bytes = 0
+
+
+def mask_cache_stats():
+    """Hits, misses and resident bytes, for benchmarks to report."""
+    return dict(_CACHE_STATS, entries=len(_mask_cache),
+                bytes=_mask_cache_bytes)
+
+
+_CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def clear_mask_cache():
+    global _mask_cache_bytes
+    _mask_cache.clear()
+    _mask_cache_bytes = 0
+    _CACHE_STATS.update(hits=0, misses=0)
+
+
+def _mask_transform(mask, fshape):
+    """``rfftn`` of the reversed mask, padded to ``fshape``, memoised."""
+    global _mask_cache_bytes
+    key = (id(mask), fshape)
+    hit = _mask_cache.get(key)
+    if hit is not None:
+        _mask_cache.move_to_end(key)
+        _CACHE_STATS["hits"] += 1
+        return hit[1]
+
+    _CACHE_STATS["misses"] += 1
+    fb = sp_fft.rfftn(mask[::-1, ::-1, ::-1].astype(np.float32), fshape)
+    budget = _CACHE_MB * 1e6
+    if fb.nbytes <= budget:
+        _mask_cache[key] = (mask, fb)
+        _mask_cache_bytes += fb.nbytes
+        while _mask_cache_bytes > budget:
+            _, (_, evicted) = _mask_cache.popitem(last=False)
+            _mask_cache_bytes -= evicted.nbytes
+    return fb
+
+
 def _correlate(pile_sub, mask):
-    """Overlap count for every offset of ``mask`` inside ``pile_sub``."""
+    """Overlap count for every offset of ``mask`` inside ``pile_sub``.
+
+    This is ``signal.fftconvolve(pile, mask[::-1, ::-1, ::-1], "valid")``
+    written out, so that the mask's transform can come from the cache
+    above.  Everything else -- float32 throughout, ``next_fast_len`` on
+    each axis -- is what scipy would have done.
+    """
     a = pile_sub.astype(np.float32)
-    b = mask[::-1, ::-1, ::-1].astype(np.float32)
-    out = signal.fftconvolve(a, b, mode="valid")
-    return out
+    s1 = np.asarray(a.shape)
+    s2 = np.asarray(mask.shape)
+    if np.any(s1 < s2):
+        # scipy refuses this rather than returning an empty result, and so
+        # should we: it means a caller sliced the pile too small, which is
+        # a bug worth hearing about rather than an empty set of offsets.
+        raise ValueError("pile region %s is smaller than the mask %s"
+                         % (tuple(s1), tuple(s2)))
+    fshape = tuple(int(sp_fft.next_fast_len(int(d), True)) for d in s1 + s2 - 1)
+
+    fa = sp_fft.rfftn(a, fshape)
+    fb = _mask_transform(mask, fshape)
+    full = sp_fft.irfftn(fa * fb, fshape)
+
+    # The 'valid' window of a full convolution of sizes s1 and s2 starts at
+    # s2 - 1 on each axis and runs for s1 - s2 + 1.
+    return full[tuple(slice(int(lo), int(lo + n))
+                      for lo, n in zip(s2 - 1, s1 - s2 + 1))]
 
 
 def _axis_span(cur_lo, cur_hi, offs, pad, ext_v):
